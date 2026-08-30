@@ -1,0 +1,391 @@
+#!/usr/bin/env python
+from misc.utility.scons_hints import *
+
+import os
+
+Import("env")
+Import("env_modules")
+
+# This module bridges Godot's Vulkan VkInstance/VkDevice/queues into a
+# compute-only Luisa Device (Luisa imports Godot's handles via
+# VulkanDeviceConfigExt, the mirror of Godot's VulkanHooks seam).
+#
+# Build wiring (plan §8):
+#   - Luisa lives at thirdparty/luisa_compute (git submodule or junction).
+#   - Its XMake build outputs import libs + DLLs into
+#       thirdparty/luisa_compute/bin/<debug|release>/
+#     (scripts/xmake_func.lua appends the mode to lc_bin_dir and set_targetdir
+#      redirects there).
+#   - The build mode is selected from Godot's own target/dev_build so SCons and
+#     XMake always agree — this is the core mode-match guarantee. If the
+#     artifacts for the selected mode are missing, we either build them with
+#     XMake (builtin_luisa=yes) or fail loudly (builtin_luisa=no); we never
+#     silently fall back to the other mode's artifacts.
+
+env_lc = env_modules.Clone()
+
+# Guards all module sources so the module compiles to empty stubs when the
+# bridge is disabled; also lets us opt into the system STL for Luisa headers.
+env_lc.AppendUnique(CPPDEFINES=["LUISA_COMPUTE_ENABLED"])
+
+# Luisa's public headers require C++20 and use EASTL for luisa::string /
+# luisa::vector / luisa::unique_ptr. The prebuilt DLLs we link were built the
+# same way (EASTL, C++20), so the module MUST match: defining
+# LUISA_USE_SYSTEM_STL here would make luisa::string a std::string inside the
+# module while the DLL sees an EASTL string — an ABI violation that corrupts
+# the VulkanLibPath/ExternalDevice structs crossing the DLL boundary
+# (observed as MSVC "cannot construct a string_view from a null pointer and a
+# non-zero size" right after loading luisa-backend-vk.dll). So we keep EASTL
+# on the include path instead of switching to the system STL.
+for _flags in ("CCFLAGS", "CXXFLAGS"):
+    _replaced = []
+    for _f in env_lc[_flags]:
+        _f = _f.replace("/std:c++17", "/std:c++20")   # MSVC
+        _f = _f.replace("-std=c++17", "-std=c++20")   # GCC/Clang
+        _replaced.append(_f)
+    env_lc[_flags] = _replaced
+
+# Luisa source tree (junction/submodule at thirdparty/luisa_compute).
+luisa_src = "#thirdparty/luisa_compute"
+
+# --- Map Godot build settings -> XMake mode ----------------------------------
+# Guarantee: the SAME build mode (debug or release) is used for both SCons and
+# XMake, so the consumed/produced .lib/.dll are ABI- and CRT-compatible with
+# the engine.
+#
+# The deciding factor is Godot's C runtime: platform/windows/detect.py selects
+# /MDd ONLY when debug_crt=yes, and /MD (or /MT) otherwise. XMake's `debug`
+# mode is /MDd and its `release` mode is /MD, so:
+#
+#   Godot debug_crt=yes                  -> XMake "debug"   (/MDd, matches)
+#   Godot default (editor/template_*/production, /MD or /MT)
+#                                        -> XMake "release" (/MD, matches)
+#
+# Mapping Godot's editor/template_debug targets to XMake debug *without*
+# debug_crt would pair a release-CRT engine with a /MDd Luisa — the CRT and
+# _ITERATOR_DEBUG_LEVEL would then disagree across the config-ext boundary and
+# luisa::string/luisa::vector (std::basic_string / eastl::vector) would be
+# laid out differently on each side, corrupting the returned loader identity.
+import methods
+
+_is_debug_crt = bool(env_lc.get("debug_crt", False))
+xmake_mode = "debug" if _is_debug_crt else "release"
+
+# XMake platform/arch mapping (only platforms the bridge supports).
+xmake_plat = {"windows": "windows", "linuxbsd": "linux", "macos": "macosx"}.get(env_lc["platform"], None)
+if xmake_plat is None:
+    raise Exception("Luisa Compute module: unsupported platform '%s'" % env_lc["platform"])
+xmake_arch = {"x86_64": "x64", "arm64": "arm64"}.get(env_lc["arch"], "x64")
+
+# Toolchain alignment is mandatory for ABI compatibility: Godot built with
+# use_llvm=yes maps to XMake's clang-cl; the default MSVC build maps to msvc.
+if env_lc["platform"] == "windows":
+    xmake_tc = "clang-cl" if env_lc.get("use_llvm", False) else "msvc"
+else:
+    xmake_tc = "clang"
+
+# Luisa artifacts for the selected mode.
+luisa_bin_dir = luisa_src + "/bin/" + xmake_mode
+_luisa_bin_abs = Dir(luisa_bin_dir).abspath
+
+# The import libs the bridge links against. This is the set that exists in
+# BOTH bin/debug and bin/release of the Luisa tree (verified); anything else
+# (luisa-glslang, luisa-volk, spirv-tools, spdlog, eastl, ...) is either baked
+# into the shared libs or absent, so it must not appear here or the linker
+# fails with "cannot open file".
+_luisa_libs = [
+    "luisa-backend-vk",
+    "luisa-runtime",
+    "luisa-core",
+    "luisa-dsl",
+    "luisa-vstl",
+    "luisa-coro",
+    "luisa-spirv",
+    "luisa-hlsl-codegen",
+    "luisa-ext-lc-volk",
+    "luisa-ext-lc-glslang",
+    "luisa-ext-lc-yyjson",
+    "luisa-ext-spirv-tools",
+    "luisa-ext-spdlog",
+    "luisa-ext-stb-image",
+    "luisa-validation-layer",
+]
+
+# DLLs copied next to the Godot binary so they resolve at runtime. dxcompiler/
+# dxil are optional (Luisa's VK backend uses DXC for SPIR-V when DXC
+# compatibility is enabled, which is its default).
+_luisa_dlls = ["luisa-backend-vk", "luisa-core", "luisa-runtime", "luisa-coro"]
+_luisa_optional_dlls = ["dxcompiler", "dxil", "luisa-validation-layer"]
+
+
+def _artifacts_present():
+    """True when the Luisa artifacts for THIS build's mode AND toolchain exist.
+
+    Beyond mode matching, the plan (§10, "ABI/compiler mismatch") requires the
+    Luisa DLLs to be built with the SAME toolchain as the engine. Consuming
+    artifacts produced by a different toolchain leaves a cross-compiler ABI
+    mismatch on the config-ext vtable boundary, which manifests as heap/STL
+    corruption inside the backend. So a mode directory is only accepted when
+    its stamp records the toolchain (and arch) we are building with now.
+    """
+    import os
+    stamp = os.path.join(_luisa_bin_abs, ".luisa_toolchain_stamp")
+    if not os.path.isfile(stamp):
+        # No stamp: the tree was built outside this SCons setup, so its
+        # toolchain is unknown — only trust it when it agrees with the default
+        # XMake toolchain for this platform.
+        return False
+    with open(stamp) as f:
+        recorded = f.read().strip()
+    return recorded == _luisa_toolchain_id()
+
+
+def _luisa_toolchain_id():
+    return "%s-%s-%s" % (xmake_plat, xmake_arch, xmake_tc)
+
+
+_need_xmake = not _artifacts_present()
+
+if _need_xmake:
+    if not env_lc.get("builtin_luisa", True):
+        raise Exception(
+            "Luisa Compute: prebuilt artifacts for mode '%s' are missing under "
+            "'%s' and builtin_luisa=no forbids building them. Build Luisa with "
+            "`xmake f -m %s && xmake build lc-backend-vk lc-runtime lc-core` in "
+            "%s, or pass builtin_luisa=yes."
+            % (xmake_mode, luisa_bin_dir, xmake_mode, luisa_src))
+
+    # Luisa options pinned for the compute-companion role: only the Vulkan
+    # backend, GUI/Python/OSL/tests/clangcxx off, RTTI off (matches Godot's
+    # default), C++20 (Luisa's default). XMake expects `--option=value` syntax
+    # on the `f` command line (a bare `lc_x=true` is rejected as an invalid
+    # argument).
+    _lo = {
+        "lc_vk_backend": "true",
+        "lc_dx_backend": "false",
+        "lc_cuda_backend": "false",
+        "lc_metal_backend": "false",
+        "lc_fallback_backend": "false",
+        "lc_enable_gui": "false",
+        "lc_enable_py": "false",
+        "lc_enable_tests": "false",
+        "lc_enable_osl": "false",
+        "lc_enable_clangcxx": "false",
+        "lc_enable_dsl": "true",
+        "lc_rtti": "false",
+        "lc_cxx_standard": "cxx20",
+    }
+    luisa_opts = " ".join("--%s=%s" % (k, v) for k, v in _lo.items())
+    xmake_cfg = "xmake f -p %s -a %s -m %s --toolchain=%s -y %s" % (
+        xmake_plat, xmake_arch, xmake_mode, xmake_tc, luisa_opts)
+    # Building lc-backend-vk pulls in runtime/core/vstl/dsl/hlsl-codegen/spirv/
+    # glslang/spirv-tools/volk transitively via XMake's dependency graph. This
+    # XMake version accepts a single target per `build` invocation ("invalid
+    # argument" for a second one), so build just the backend.
+    xmake_bld = "xmake build lc-backend-vk"
+
+    def _luisa_build_action(target, source, env):
+        import os
+        import subprocess
+
+        src = Dir(luisa_src).abspath
+        if not os.path.isdir(src):
+            raise Exception(
+                "Luisa Compute source not found at '%s'. Add Luisa as a git "
+                "submodule or directory junction at thirdparty/luisa_compute." % src)
+
+        full_env = dict(os.environ)
+        for cmd in (xmake_cfg, xmake_bld):
+            print("[luisa_compute] $ " + cmd)
+            rc = subprocess.call(cmd, cwd=src, env=full_env)
+            if rc != 0:
+                raise Exception(
+                    "Luisa Compute build failed (rc=%d) while running: %s" % (rc, cmd))
+
+        # Mode-match + toolchain-match guarantee: the linker must never pick up
+        # a stale or wrong-mode/wrong-toolchain artifact, so verify the expected
+        # import lib landed in the mode directory we are about to link against.
+        expected_lib = os.path.join(_luisa_bin_abs, "luisa-backend-vk.lib")
+        if not os.path.isfile(expected_lib):
+            raise Exception(
+                "Luisa Compute build did not produce expected artifact '%s'. "
+                "Check that XMake reported success for mode '%s'." % (expected_lib, xmake_mode))
+
+        with open(target[0].abspath, "w") as f:
+            f.write(luisa_bin_dir + "\n")
+
+        # Record mode+toolchain so later builds can tell whether the artifacts
+        # still match this engine configuration.
+        with open(os.path.join(_luisa_bin_abs, ".luisa_toolchain_stamp"), "w") as f:
+            f.write(_luisa_toolchain_id() + "\n")
+
+    marker = methods.CommandNoCache(
+        env_lc,
+        luisa_bin_dir + "/.luisa_built",
+        [],
+        methods.Run(env_lc, _luisa_build_action, "$GENCOMSTR"),
+    )
+else:
+    # Prebuilt artifacts for the selected mode are present: consume them
+    # directly. The marker is a stamp so SCons still tracks a dependency node
+    # for the link step without re-running XMake.
+    def _luisa_stamp_action(target, source, env):
+        with open(target[0].abspath, "w") as f:
+            f.write(luisa_bin_dir + "\n")
+
+    marker = methods.CommandNoCache(
+        env_lc,
+        luisa_bin_dir + "/.luisa_built",
+        [],
+        methods.Run(env_lc, _luisa_stamp_action, "$GENCOMSTR"),
+    )
+    print("[luisa_compute] consuming prebuilt Luisa artifacts (mode=%s): %s" % (xmake_mode, _luisa_bin_abs))
+
+# --- Consume Luisa artifacts as link inputs ----------------------------------
+# Public include dirs published by Luisa's lc-core target (src/core/xmake.lua):
+#   ../../include, ../ext/xxHash/, ../ext/magic_enum/include, ../ext/half/include
+# plus Godot's own Vulkan headers. The module sources include
+# "drivers/vulkan/godot_vulkan.h" (Godot's canonical volk-aware Vulkan include)
+# so the volk/vulkan ordering is handled there.
+env_lc.Prepend(CPPPATH=[
+    luisa_src + "/include",
+    luisa_src + "/src/ext/half/include",
+    luisa_src + "/src/ext/magic_enum/include",
+    luisa_src + "/src/ext/xxHash",
+    luisa_src + "/src/ext/spdlog/include",
+    luisa_src + "/src/ext/marl/include",
+    # EASTL + EABase (must match the STL the Luisa DLLs were built with).
+    luisa_src + "/src/ext/EASTL/include",
+    luisa_src + "/src/ext/EASTL/packages/EABase/include/Common",
+    "#thirdparty/vulkan/include",
+    "#thirdparty/volk",
+])
+
+# Public defines Luisa's lc-core sets for consumers (mirrored so the headers
+# parse identically to how the DLLs were built).
+#
+# CRITICAL — EASTL configuration must match Luisa's `eastl` target exactly
+# (src/ext/EASTL/xmake.lua). Luisa builds EASTL with EASTL_USER_DEFINED_ALLOCATOR
+# + EA_DLL, so `eastl::allocator` resolves to Luisa's own allocator (routed
+# through luisa-core.dll) and the MSVC debug-CRT placement operator new[]
+# declarations are suppressed. Omitting those defines makes THIS module compile
+# EASTL's built-in allocator instead, whose layout differs from the DLL's —
+# eastl::vector/eastl::string returned across the config-ext vtable are then
+# misinterpreted by the DLL (observed as MSVC "cannot construct a string_view
+# from a null pointer and a non-zero size" right after loading
+# luisa-backend-vk.dll).
+_eastl_public_defs = [
+    "EA_PRAGMA_ONCE_SUPPORTED",
+    "EA_HAVE_CPP11_CONTAINERS",
+    "EA_HAVE_CPP11_ATOMIC",
+    "EA_HAVE_CPP11_CONDITION_VARIABLE",
+    "EA_HAVE_CPP11_MUTEX",
+    "EA_HAVE_CPP11_THREAD",
+    "EA_HAVE_CPP11_FUTURE",
+    "EA_HAVE_CPP11_TYPE_TRAITS",
+    "EA_HAVE_CPP11_TUPLES",
+    "EA_HAVE_CPP11_REGEX",
+    "EA_HAVE_CPP11_RANDOM",
+    "EA_HAVE_CPP11_CHRONO",
+    "EA_HAVE_CPP11_SCOPED_ALLOCATOR",
+    "EA_HAVE_CPP11_INITIALIZER_LIST",
+    "EA_HAVE_CPP11_SYSTEM_ERROR",
+    "EA_HAVE_CPP11_TYPEINDEX",
+    "EASTL_STD_ITERATOR_CATEGORY_ENABLED",
+    "EASTL_STD_TYPE_TRAITS_AVAILABLE",
+    "EASTL_MOVE_SEMANTICS_ENABLED",
+    "EASTL_VARIADIC_TEMPLATES_ENABLED",
+    "EASTL_VARIABLE_TEMPLATES_ENABLED",
+    "EASTL_INLINE_VARIABLE_ENABLED",
+    "EASTL_HAVE_CPP11_TYPE_TRAITS",
+    "EASTL_INLINE_NAMESPACES_ENABLED",
+    "EASTL_ALLOCATOR_EXPLICIT_ENABLED",
+    "EASTL_USER_DEFINED_ALLOCATOR",
+    "EA_DLL",
+    "LC_EASTL_EXPORT=1",
+    "EASTL_PROJECT=1",
+]
+# Luisa adds EA_DEBUG only for its debug/releasedbg modes; mirror that so
+# EASTL's internal EASTL_DEBUG/EASTL_DEBUGPARAMS_LEVEL defaults agree.
+if xmake_mode != "release":
+    _eastl_public_defs.append("EA_DEBUG")
+
+_luisa_public_defs = [
+    "NOMINMAX",
+    "LUISA_ENABLE_DSL",
+    "LUISA_ENABLE_XIR",
+] + _eastl_public_defs
+if env_lc["platform"] == "windows":
+    _luisa_public_defs += ["LUISA_PLATFORM_WINDOWS"]
+elif env_lc["platform"] == "macos":
+    _luisa_public_defs += ["LUISA_PLATFORM_UNIX", "LUISA_PLATFORM_APPLE"]
+else:
+    _luisa_public_defs += ["LUISA_PLATFORM_UNIX"]
+env_lc.AppendUnique(CPPDEFINES=_luisa_public_defs)
+
+env_lc.Append(LIBPATH=[_luisa_bin_abs])
+env_lc.Append(LIBS=_luisa_libs)
+
+# The Luisa import libs must be visible to the FINAL program link, which is
+# driven by the global `env` (see platform/<platform>/SCsub) — module-local
+# env_lc LIBS only affect building libmodule_luisa_compute.lib and would leave
+# the luisa::compute::Context/Device/Stream symbols unresolved (LNK2019).
+#
+# We pass the .lib files through raw LINKFLAGS (same pattern as
+# modules/raycast/SCsub's "psapi.lib"): putting them in env LIBS makes SCons
+# resolve/decorate the names with Godot's platform-tagged env["LIBSUFFIX"]
+# (SConstruct:1162), producing "luisa-backend-vk...lib.windows...lib" and
+# failing with LNK1181. Raw LINKFLAGS reach the linker untouched.
+_luisa_lib_paths = [_luisa_bin_abs + "/" + lib + ".lib" for lib in _luisa_libs]
+env.Append(LINKFLAGS=_luisa_lib_paths)
+
+
+# --- Copy the Luisa runtime DLLs next to the Godot binary --------------------
+# Each copy is a SCons target that depends on the marker, so the DLLs are
+# always in sync with the mode that was actually selected/built.
+def _make_dll_copy_action(dll_name, optional):
+    def action(target, source, env):
+        import os
+        import shutil
+        src = _luisa_bin_abs + "/" + dll_name + ".dll"
+        dst = target[0].abspath
+        if not os.path.isfile(src):
+            if optional:
+                # Touch a placeholder so the target exists; the real DLL is
+                # only needed when that feature is active at runtime.
+                open(dst, "wb").close()
+                return
+            raise Exception("Luisa DLL not found: %s" % src)
+        if os.path.isfile(dst) and os.path.getmtime(dst) == os.path.getmtime(src) \
+                and os.path.getsize(dst) == os.path.getsize(src):
+            return  # already up to date
+        shutil.copyfile(src, dst)
+    return action
+
+
+for dll_base in _luisa_dlls:
+    env_lc.CommandNoCache(
+        "#bin/" + dll_base + ".dll",
+        marker,
+        methods.Run(env_lc, _make_dll_copy_action(dll_base, False), "$GENCOMSTR"),
+    )
+for dll_base in _luisa_optional_dlls:
+    env_lc.CommandNoCache(
+        "#bin/" + dll_base + ".dll",
+        marker,
+        methods.Run(env_lc, _make_dll_copy_action(dll_base, True), "$GENCOMSTR"),
+    )
+
+# --- Guarantee Luisa artifacts exist BEFORE the Godot link -------------------
+# The engine link target is "#bin/godot" (see platform/windows/SCsub); making
+# it depend on the marker means SCons cannot link until the artifacts for the
+# selected mode are verified present (or built).
+_godot_bin = "#bin/godot"
+env_lc.Depends(_godot_bin, marker)
+
+# Module's own sources.
+module_obj = []
+env_lc.add_source_files(module_obj, "*.cpp")
+env.modules_sources += module_obj
+# Rebuild module files when Luisa is rebuilt (header changes).
+env_lc.Depends(module_obj, marker)

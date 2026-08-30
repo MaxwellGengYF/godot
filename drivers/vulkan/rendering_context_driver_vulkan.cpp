@@ -692,10 +692,13 @@ Error RenderingContextDriverVulkan::_initialize_instance() {
 		enabled_extension_names.push_back(extension_name.ptr());
 	}
 
-	// We'll set application version to the Vulkan version we're developing against, even if our instance is based on an older Vulkan
-	// version, devices can still support newer versions of Vulkan. The exception is when we're on Vulkan 1.0, we should not set this
-	// to anything but 1.0. Note that this value is only used by validation layers to warn us about version issues.
-	uint32_t application_api_version = instance_api_version == VK_API_VERSION_1_0 ? VK_API_VERSION_1_0 : VK_API_VERSION_1_2;
+		// We'll set application version to the Vulkan version we're developing against, even if our instance is based on an older Vulkan
+		// version, devices can still support newer versions of Vulkan. The exception is when we're on Vulkan 1.0, we should not set this
+		// to anything but 1.0. Note that this value is only used by validation layers to warn us about version issues.
+		// Luisa Compute (when enabled as a compute companion) imports this instance's handles and attests an API version of
+		// at least VK_API_VERSION_1_3 (its Vulkan backend uses Vulkan 1.3 core commands). Vulkan 1.3 is backward compatible, so
+		// reporting 1.3 here is safe and only affects validation-layer warnings.
+		uint32_t application_api_version = instance_api_version == VK_API_VERSION_1_0 ? VK_API_VERSION_1_0 : VK_API_VERSION_1_3;
 
 	CharString cs = GLOBAL_GET("application/config/name").operator String().utf8();
 	VkApplicationInfo app_info = {};

@@ -1005,12 +1005,11 @@ Error RenderingDeviceDriverVulkan::_check_device_capabilities() {
 			next_features = &raytracing_validation_features;
 		}
 
-		if (enabled_device_extension_names.has(VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME)) {
-			sync_2_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SYNCHRONIZATION_2_FEATURES;
-			sync_2_features.pNext = next_features;
-			next_features = &sync_2_features;
-		}
-
+			if (enabled_device_extension_names.has(VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME)) {
+				sync_2_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SYNCHRONIZATION_2_FEATURES;
+				sync_2_features.pNext = next_features;
+				next_features = &sync_2_features;
+			}
 		if (enabled_device_extension_names.has(VK_KHR_RAY_QUERY_EXTENSION_NAME)) {
 			ray_query_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR;
 			ray_query_features.pNext = next_features;
@@ -1108,6 +1107,18 @@ Error RenderingDeviceDriverVulkan::_check_device_capabilities() {
 
 		if (enabled_device_extension_names.has(VK_KHR_RAY_QUERY_EXTENSION_NAME)) {
 			ray_query_support = ray_query_features.rayQuery;
+		}
+
+		// Record whether synchronization2 is supported so the device create
+		// chain can enable it (required by the compute-companion import contract).
+		if (enabled_device_extension_names.has(VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME)) {
+			synchronization_2_support = sync_2_features.synchronization2;
+		}
+		// timelineSemaphore is a Vulkan 1.2 core feature (promoted from
+		// VK_KHR_timeline_semaphore). When we queried the 1.2 features struct
+		// above, the result is in device_features_vk_1_2.timelineSemaphore.
+		if (physical_device_properties.apiVersion >= VK_API_VERSION_1_2) {
+			timeline_semaphore_support = device_features_vk_1_2.timelineSemaphore;
 		}
 	}
 
@@ -1456,13 +1467,47 @@ Error RenderingDeviceDriverVulkan::_initialize_device(const LocalVector<VkDevice
 		create_info_next = &raytracing_validation_features;
 	}
 
-	VkPhysicalDeviceRayQueryFeaturesKHR ray_query_features = {};
-	if (ray_query_support) {
-		ray_query_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR;
-		ray_query_features.pNext = create_info_next;
-		ray_query_features.rayQuery = ray_query_support;
-		create_info_next = &ray_query_features;
-	}
+		VkPhysicalDeviceRayQueryFeaturesKHR ray_query_features = {};
+		if (ray_query_support) {
+			ray_query_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR;
+			ray_query_features.pNext = create_info_next;
+			ray_query_features.rayQuery = ray_query_support;
+			create_info_next = &ray_query_features;
+		}
+
+		// Synchronization2: enable when supported so the Vulkan device can be
+		// imported as a compute companion (e.g. Luisa Compute). Luisa's
+		// host-import contract attests synchronization2 = true for any borrowed
+		// device, and it also enables the modern VkCmdPipelineBarrier2 path.
+		VkPhysicalDeviceSynchronization2FeaturesKHR sync_2_features_create = {};
+		if (synchronization_2_support) {
+			sync_2_features_create.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SYNCHRONIZATION_2_FEATURES;
+			sync_2_features_create.pNext = create_info_next;
+			sync_2_features_create.synchronization2 = VK_TRUE;
+			create_info_next = &sync_2_features_create;
+		}
+
+		VkPhysicalDeviceVulkan12Features vulkan_1_2_features_create = {};
+		if (physical_device_properties.apiVersion >= VK_API_VERSION_1_2) {
+			// Enable the Vulkan 1.2 feature struct so timelineSemaphore is
+			// enabled on the logical device. Luisa Compute (when used as a
+			// compute companion) attests timeline_semaphore = true for any
+			// borrowed device, and it also enables cheap cross-engine
+			// timeline-semaphore synchronization. We only set the fields that
+			// are not already covered by the Vulkan11Features struct above or
+			// by the dedicated KHR structs earlier in the chain.
+			vulkan_1_2_features_create.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
+			vulkan_1_2_features_create.pNext = create_info_next;
+			vulkan_1_2_features_create.timelineSemaphore = timeline_semaphore_support ? VK_TRUE : VK_FALSE;
+			vulkan_1_2_features_create.drawIndirectCount = VK_TRUE;
+			vulkan_1_2_features_create.samplerFilterMinmax = VK_TRUE;
+			vulkan_1_2_features_create.imagelessFramebuffer = VK_TRUE;
+			vulkan_1_2_features_create.uniformAndStorageBuffer8BitAccess = VK_TRUE;
+			vulkan_1_2_features_create.storageBuffer8BitAccess = VK_TRUE;
+			vulkan_1_2_features_create.shaderInt8 = VK_TRUE;
+			create_info_next = &vulkan_1_2_features_create;
+		}
+
 
 	VkPhysicalDeviceVulkan11Features vulkan_1_1_features = {};
 	VkPhysicalDevice16BitStorageFeaturesKHR storage_features = {};

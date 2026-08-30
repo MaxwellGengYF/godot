@@ -348,6 +348,14 @@ opts.Add(BoolVariable("builtin_xatlas", "Use the built-in xatlas library", True)
 opts.Add(BoolVariable("builtin_zlib", "Use the built-in zlib library", True))
 opts.Add(BoolVariable("builtin_zstd", "Use the built-in Zstd library", True))
 
+# Luisa Compute companion (Vulkan host-import). Off by default; opt-in.
+# When luisa_compute=yes and builtin_luisa=True, the module's SCsub drives an
+# XMake build of thirdparty/luisa_compute producing import libs + DLLs that
+# are consumed by the Godot link step. The bridge imports Godot's Vulkan
+# VkInstance/VkDevice/queues into a compute-only Luisa Device.
+opts.Add(BoolVariable("luisa_compute", "Enable the Luisa Compute companion (Vulkan host-import)", False))
+opts.Add(BoolVariable("builtin_luisa", "Build Luisa Compute from the submodule/junction at thirdparty/luisa_compute via XMake", True))
+
 # Compilation environment setup
 # CXX, CC, and LINK directly set the equivalent `env` values (which may still
 # be overridden for a specific platform), the lowercase ones are appended.

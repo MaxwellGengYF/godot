@@ -162,6 +162,8 @@ class RenderingDeviceDriverVulkan : public RenderingDeviceDriver {
 	bool buffer_device_address_support = false;
 	bool vulkan_memory_model_support = false;
 	bool vulkan_memory_model_device_scope_support = false;
+	bool synchronization_2_support = false; // VK_KHR_synchronization2 / Vulkan 1.3 core
+	bool timeline_semaphore_support = false; // Vulkan 1.2 core (promoted from VK_KHR_timeline_semaphore)
 	AccelerationStructureCapabilities acceleration_structure_capabilities;
 	bool ray_query_support = false;
 	RaytracingCapabilities raytracing_capabilities;

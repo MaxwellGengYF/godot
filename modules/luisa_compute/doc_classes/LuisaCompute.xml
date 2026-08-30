@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<class name="LuisaCompute" inherits="Object" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="../../../doc/class.xsd">
+	<brief_description>
+		Luisa Compute companion running on the engine's Vulkan device.
+	</brief_description>
+	<description>
+		LuisaCompute imports Godot's Vulkan [code]VkInstance[/code]/[code]VkDevice[/code]/queues into a compute-only Luisa Compute [Device] and exposes zero-copy bidirectional buffer/texture interop. The Luisa device is created lazily by calling [method ensure_device] after [method RenderingDevice.make_current] (usually during renderer setup), and must be destroyed with [method shutdown] before the Godot Vulkan context is torn down.
+		Only one Luisa Vulkan [Device] may be alive in a process at a time (Volk process-global dispatch tables). The companion is enabled by building the engine with [code]luisa_compute=yes[/code]; both the SCons and XMake builds use the same build mode (debug/release) so the produced libraries are ABI- and CRT-compatible with the engine.
+	</description>
+	<tutorials>
+	</tutorials>
+	<methods>
+		<method name="ensure_device">
+			<return type="bool" />
+			<description>
+				Lazily creates the Luisa [Device] on top of Godot's Vulkan handles. Safe to call multiple times; returns [code]true[/code] once the device exists. Call after [method RenderingDevice.make_current].
+			</description>
+		</method>
+		<method name="shutdown">
+			<return type="void" />
+			<description>
+				Destroys the Luisa [Device] and every borrowed command buffer before Godot tears down the Vulkan context (every imported handle is owned by Godot). Called automatically at server-level teardown.
+			</description>
+		</method>
+	</methods>
+</class>
