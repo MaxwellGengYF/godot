@@ -6,9 +6,10 @@ import os
 Import("env")
 Import("env_modules")
 
-# This module bridges Godot's Vulkan VkInstance/VkDevice/queues into a
-# compute-only Luisa Device (Luisa imports Godot's handles via
-# VulkanDeviceConfigExt, the mirror of Godot's VulkanHooks seam).
+# This module bridges Godot's rendering device (Vulkan VkInstance/VkDevice/
+# queues or a D3D12 ID3D12Device) into a compute-only Luisa Device (Luisa
+# imports Godot's handles via VulkanDeviceConfigExt / DirectXDeviceConfigExt,
+# the mirror of Godot's VulkanHooks seam).
 #
 # Build wiring (plan §8):
 #   - Luisa lives at thirdparty/luisa_compute (git submodule or junction).
@@ -44,6 +45,17 @@ for _flags in ("CCFLAGS", "CXXFLAGS"):
         _f = _f.replace("-std=c++17", "-std=c++20")   # GCC/Clang
         _replaced.append(_f)
     env_lc[_flags] = _replaced
+
+# MSVC: Luisa's headers (luisa/core/logging.h and the backend ext headers) build
+# their LUISA_ASSERT/LUISA_ERROR/LUISA_PRINT formats on __VA_OPT__, which MSVC's
+# *traditional* preprocessor does not implement (C5109 "use of __VA_OPT__
+# requires /Zc:preprocessor", then a cascade of C2065/C2760 syntax errors). The
+# conformant preprocessor is exactly what Luisa's own XMake build selects for its
+# consumers (src/../scripts/xmake_func.lua: `add("cxflags", "/Zc:preprocessor",
+# "/wd4244", {tools = "cl", public = true})`), so mirror it here. clang-cl
+# already expands __VA_OPT__ and rejects /Zc:preprocessor, hence the MSVC guard.
+if env_lc["platform"] == "windows" and not env_lc.get("use_llvm", False):
+    env_lc.AppendUnique(CCFLAGS=["/Zc:preprocessor", "/wd4244"])
 
 # Luisa source tree (junction/submodule at thirdparty/luisa_compute).
 luisa_src = "#thirdparty/luisa_compute"
@@ -84,6 +96,17 @@ if env_lc["platform"] == "windows":
 else:
     xmake_tc = "clang"
 
+# --- Which Luisa backends this module build needs ----------------------------
+# The module bridges Godot's rendering device into a compute-only Luisa device.
+# Two driver paths exist and are selected by the engine configuration:
+#   vk : Godot's VkInstance/VkDevice/queues  (needs vulkan + use_volk)
+#   dx : Godot's ID3D12Device                (needs windows + d3d12)
+# The vulkan path is the historical default and stays enabled unconditionally so
+# the VK bridge keeps linking exactly as before; the dx path is added when the
+# engine is built with the D3D12 driver.
+_lc_d3d12 = bool(env_lc["platform"] == "windows" and env_lc.get("d3d12", False))
+_lc_backends = "vk+dx" if _lc_d3d12 else "vk"
+
 # Luisa artifacts for the selected mode.
 luisa_bin_dir = luisa_src + "/bin/" + xmake_mode
 _luisa_bin_abs = Dir(luisa_bin_dir).abspath
@@ -110,12 +133,85 @@ _luisa_libs = [
     "luisa-ext-stb-image",
     "luisa-validation-layer",
 ]
+if _lc_d3d12:
+    # The dx backend (imports Godot's ID3D12Device through
+    # DirectXDeviceConfigExt). luisa-fallback-rtx / lc-tile are dependencies of
+    # lc-backend-dx: the former is a static lib baked into the backend DLL, the
+    # latter is a DLL the backend loads at runtime (no symbols for us to link).
+    _luisa_libs.append("luisa-backend-dx")
 
 # DLLs copied next to the Godot binary so they resolve at runtime. dxcompiler/
 # dxil are optional (Luisa's VK backend uses DXC for SPIR-V when DXC
 # compatibility is enabled, which is its default).
 _luisa_dlls = ["luisa-backend-vk", "luisa-core", "luisa-runtime", "luisa-coro"]
 _luisa_optional_dlls = ["dxcompiler", "dxil", "luisa-validation-layer"]
+if _lc_d3d12:
+    _luisa_dlls.append("luisa-backend-dx")
+    # luisa-backend-dx.dll *imports* luisa-tile.dll (lc-tile target): the loader
+    # needs it present next to the executable just like the other required DLLs.
+    # Keep it in the REQUIRED list, not the optional one: an optional DLL is
+    # touched as a 0-byte placeholder when missing, which would satisfy the
+    # SCons target while breaking LoadLibrary of luisa-backend-dx.dll.
+    _luisa_dlls.append("luisa-tile")
+
+
+# Luisa options pinned for the compute-companion role: the Vulkan backend and
+# (on Windows, when the engine has the D3D12 driver) the dx backend;
+# GUI/Python/OSL/tests/clangcxx off, RTTI off (matches Godot's default), C++20
+# (Luisa's default). XMake expects `--option=value` syntax on the `f` command
+# line (a bare `lc_x=true` is rejected as an invalid argument).
+_lo = {
+    # The module compiles Luisa's headers with EASTL (see _eastl_public_defs
+    # below: no LUISA_USE_SYSTEM_STL is defined for the module), so Luisa MUST
+    # be built with its bundled EASTL too. The xmake default for this option is
+    # true (scripts/options.lua), which would build luisa::string/luisa::vector
+    # as std::basic_string/std::vector inside the DLLs while the module sees the
+    # EASTL layout — a cross-DLL ABI mismatch on every struct that crosses the
+    # config-ext boundary. Pin it false so both sides agree on EASTL.
+    # Changing this value alters the stamp digest below, which forces a full
+    # `xmake f` + rebuild the first time it takes effect.
+    "lc_use_system_stl": "false",
+    "lc_vk_backend": "true",
+    "lc_dx_backend": "true" if _lc_d3d12 else "false",
+    "lc_cuda_backend": "false",
+    "lc_metal_backend": "false",
+    "lc_fallback_backend": "false",
+    "lc_enable_gui": "false",
+    "lc_enable_py": "false",
+    "lc_enable_tests": "false",
+    "lc_enable_osl": "false",
+    "lc_enable_clangcxx": "false",
+    "lc_enable_dsl": "true",
+    "lc_rtti": "false",
+    "lc_cxx_standard": "cxx20",
+}
+
+# The import libs that must exist before the engine is allowed to link.
+_luisa_required_libs = ["luisa-backend-vk"]
+if _lc_d3d12:
+    _luisa_required_libs.append("luisa-backend-dx")
+
+
+def _luisa_toolchain_id():
+    return "%s-%s-%s" % (xmake_plat, xmake_arch, xmake_tc)
+
+
+def _luisa_artifact_id():
+    """Identity of the artifact set recorded in the toolchain stamp.
+
+    Toolchain + arch + mode alone are not enough any more: the enabled-backend
+    set (and generally the pinned option set) changes which targets XMake builds
+    and which import libs/DLLs appear in the mode directory. Folding a digest of
+    the options into the stamp means flipping `d3d12` (or editing any pinned
+    option above) invalidates the stamp, so SCons re-runs `xmake f` with the new
+    option set instead of silently consuming artifacts configured for the old
+    one — XMake keeps its configuration in .xmake/ and would otherwise never see
+    the change.
+    """
+    import hashlib
+
+    digest = hashlib.md5(("|".join("%s=%s" % (k, _lo[k]) for k in sorted(_lo))).encode("utf8")).hexdigest()[:8]
+    return "%s+%s+%s" % (_luisa_toolchain_id(), _lc_backends, digest)
 
 
 def _artifacts_present():
@@ -137,11 +233,15 @@ def _artifacts_present():
         return False
     with open(stamp) as f:
         recorded = f.read().strip()
-    return recorded == _luisa_toolchain_id()
-
-
-def _luisa_toolchain_id():
-    return "%s-%s-%s" % (xmake_plat, xmake_arch, xmake_tc)
+    if recorded != _luisa_artifact_id():
+        return False
+    # Every required import lib must actually be there: the stamp can predate a
+    # backend being enabled (or a manual clean of the mode directory), and
+    # linking against a missing .lib is a confusing late failure.
+    for lib in _luisa_required_libs:
+        if not os.path.isfile(os.path.join(_luisa_bin_abs, lib + ".lib")):
+            return False
+    return True
 
 
 _need_xmake = not _artifacts_present()
@@ -155,34 +255,18 @@ if _need_xmake:
             "%s, or pass builtin_luisa=yes."
             % (xmake_mode, luisa_bin_dir, xmake_mode, luisa_src))
 
-    # Luisa options pinned for the compute-companion role: only the Vulkan
-    # backend, GUI/Python/OSL/tests/clangcxx off, RTTI off (matches Godot's
-    # default), C++20 (Luisa's default). XMake expects `--option=value` syntax
-    # on the `f` command line (a bare `lc_x=true` is rejected as an invalid
-    # argument).
-    _lo = {
-        "lc_vk_backend": "true",
-        "lc_dx_backend": "false",
-        "lc_cuda_backend": "false",
-        "lc_metal_backend": "false",
-        "lc_fallback_backend": "false",
-        "lc_enable_gui": "false",
-        "lc_enable_py": "false",
-        "lc_enable_tests": "false",
-        "lc_enable_osl": "false",
-        "lc_enable_clangcxx": "false",
-        "lc_enable_dsl": "true",
-        "lc_rtti": "false",
-        "lc_cxx_standard": "cxx20",
-    }
     luisa_opts = " ".join("--%s=%s" % (k, v) for k, v in _lo.items())
     xmake_cfg = "xmake f -p %s -a %s -m %s --toolchain=%s -y %s" % (
         xmake_plat, xmake_arch, xmake_mode, xmake_tc, luisa_opts)
     # Building lc-backend-vk pulls in runtime/core/vstl/dsl/hlsl-codegen/spirv/
-    # glslang/spirv-tools/volk transitively via XMake's dependency graph. This
-    # XMake version accepts a single target per `build` invocation ("invalid
-    # argument" for a second one), so build just the backend.
-    xmake_bld = "xmake build lc-backend-vk"
+    # glslang/spirv-tools/volk transitively via XMake's dependency graph;
+    # lc-backend-dx pulls in runtime/core/vstl/hlsl-codegen/tile/fallback-rtx.
+    # This XMake version accepts a single target per `build` invocation ("invalid
+    # argument" for a second one), so build one backend at a time.
+    xmake_targets = ["lc-backend-vk"]
+    if _lc_d3d12:
+        xmake_targets.append("lc-backend-dx")
+    xmake_cmds = [xmake_cfg] + ["xmake build " + t for t in xmake_targets]
 
     def _luisa_build_action(target, source, env):
         import os
@@ -195,7 +279,7 @@ if _need_xmake:
                 "submodule or directory junction at thirdparty/luisa_compute." % src)
 
         full_env = dict(os.environ)
-        for cmd in (xmake_cfg, xmake_bld):
+        for cmd in xmake_cmds:
             print("[luisa_compute] $ " + cmd)
             rc = subprocess.call(cmd, cwd=src, env=full_env)
             if rc != 0:
@@ -204,20 +288,28 @@ if _need_xmake:
 
         # Mode-match + toolchain-match guarantee: the linker must never pick up
         # a stale or wrong-mode/wrong-toolchain artifact, so verify the expected
-        # import lib landed in the mode directory we are about to link against.
-        expected_lib = os.path.join(_luisa_bin_abs, "luisa-backend-vk.lib")
-        if not os.path.isfile(expected_lib):
-            raise Exception(
-                "Luisa Compute build did not produce expected artifact '%s'. "
-                "Check that XMake reported success for mode '%s'." % (expected_lib, xmake_mode))
+        # import libs landed in the mode directory we are about to link against.
+        for lib in _luisa_required_libs:
+            expected_lib = os.path.join(_luisa_bin_abs, lib + ".lib")
+            if not os.path.isfile(expected_lib):
+                raise Exception(
+                    "Luisa Compute build did not produce expected artifact '%s'. "
+                    "Check that XMake reported success for mode '%s'." % (expected_lib, xmake_mode))
 
         with open(target[0].abspath, "w") as f:
             f.write(luisa_bin_dir + "\n")
+            # Embed the artifact identity in the marker so any option/toolchain
+            # change (which rewrites the artifacts) also changes the marker
+            # CONTENT: the DLL-copy targets list the marker as their source, and
+            # SCons re-runs them on content changes — without this, a rebuilt
+            # bin/<mode>/*.dll set would leave stale copies next to the binary
+            # (observed: EASTL-rebuilt DLLs not re-copied over the Aug 30 set).
+            f.write(_luisa_artifact_id() + "\n")
 
-        # Record mode+toolchain so later builds can tell whether the artifacts
-        # still match this engine configuration.
+        # Record mode+toolchain+backend-set so later builds can tell whether the
+        # artifacts still match this engine configuration.
         with open(os.path.join(_luisa_bin_abs, ".luisa_toolchain_stamp"), "w") as f:
-            f.write(_luisa_toolchain_id() + "\n")
+            f.write(_luisa_artifact_id() + "\n")
 
     marker = methods.CommandNoCache(
         env_lc,
@@ -232,6 +324,8 @@ else:
     def _luisa_stamp_action(target, source, env):
         with open(target[0].abspath, "w") as f:
             f.write(luisa_bin_dir + "\n")
+            # Same marker-content rule as the build branch above.
+            f.write(_luisa_artifact_id() + "\n")
 
     marker = methods.CommandNoCache(
         env_lc,
@@ -260,6 +354,23 @@ env_lc.Prepend(CPPPATH=[
     "#thirdparty/vulkan/include",
     "#thirdparty/volk",
 ])
+
+if _lc_d3d12:
+    # Luisa's dx backend headers. `src/backends/dx` makes
+    # <LCAgilitySDK/d3d12.h> (selected by LUISA_DX_SDK inside
+    # luisa/backends/ext/dx_config_ext.h) resolve, exactly like the backend's own
+    # `add_includedirs("./")`; it also hosts the backend-private DXApi/ext.h
+    # (NativeTextureDesc) needed for D3D12 resource interop. `LCAgilitySDK` is
+    # additionally put on the path so a plain <d3d12.h> — pulled in by Godot's
+    # drivers/d3d12 headers — resolves to the SAME bundled Agility header instead
+    # of the Windows SDK copy (both use the __d3d12_h__ guard, so one physical
+    # version must win to keep the interface definitions consistent with the
+    # headers the backend DLL itself was compiled against).
+    # src/backends/dx must come first (it is the "parent" of LCAgilitySDK).
+    env_lc.Prepend(CPPPATH=[
+        luisa_src + "/src/backends/dx",
+        luisa_src + "/src/backends/dx/LCAgilitySDK",
+    ])
 
 # Public defines Luisa's lc-core sets for consumers (mirrored so the headers
 # parse identically to how the DLLs were built).
@@ -309,11 +420,24 @@ _eastl_public_defs = [
 # EASTL's internal EASTL_DEBUG/EASTL_DEBUGPARAMS_LEVEL defaults agree.
 if xmake_mode != "release":
     _eastl_public_defs.append("EA_DEBUG")
-
 _luisa_public_defs = [
     "NOMINMAX",
     "LUISA_ENABLE_DSL",
     "LUISA_ENABLE_XIR",
+    # Must mirror the public define set of the consumed artifacts: lc-runtime
+    # publishes LUISA_ENABLE_SAFE_MODE (src/runtime/xmake.lua:19) whenever
+    # `lc_safe_mode` is on, and the vendored preset turns it on
+    # (scripts/options.lua:6 `lc_safe_mode = true`, recorded in
+    # .xmake/windows/x64/xmake.conf). The mode is NOT a pure no-op switch: it
+    # changes which inline members/overloads the public headers expose (e.g.
+    # include/luisa/runtime/buffer.h:107/164/300 guard `copy_to(void*)` /
+    # `copy_to(BufferView)` and the creation-failure checks with
+    # #ifdef/#ifndef LUISA_ENABLE_SAFE_MODE), so compiling the module without it
+    # against safe-mode DLLs is a header/config mismatch on the DSL boundary
+    # (observed as an access violation while the Vulkan backend writes the DSL
+    # kernel argument pool during dispatch). If the preset is ever turned off,
+    # drop this define together with it.
+    "LUISA_ENABLE_SAFE_MODE",
 ] + _eastl_public_defs
 if env_lc["platform"] == "windows":
     _luisa_public_defs += ["LUISA_PLATFORM_WINDOWS"]
@@ -321,6 +445,12 @@ elif env_lc["platform"] == "macos":
     _luisa_public_defs += ["LUISA_PLATFORM_UNIX", "LUISA_PLATFORM_APPLE"]
 else:
     _luisa_public_defs += ["LUISA_PLATFORM_UNIX"]
+if _lc_d3d12:
+    # Mirror src/backends/dx/xmake.lua's `add_defines("LUISA_DX_SDK")`: the dx
+    # headers then include the bundled <LCAgilitySDK/d3d12.h> (same interface
+    # definitions the backend DLL was built with). NOMINMAX is already above —
+    # the DX headers would otherwise break on min/max.
+    _luisa_public_defs += ["LUISA_DX_SDK"]
 env_lc.AppendUnique(CPPDEFINES=_luisa_public_defs)
 
 env_lc.Append(LIBPATH=[_luisa_bin_abs])

@@ -7360,13 +7360,20 @@ uint64_t RenderingDeviceDriverVulkan::get_resource_native_handle(DriverResource 
 			const TextureInfo *tex_info = (const TextureInfo *)p_driver_id.id;
 			return (uint64_t)tex_info->vk_view_create_info.format;
 		}
+		case DRIVER_RESOURCE_BUFFER: {
+			// Return the actual VkBuffer, consistent with DRIVER_RESOURCE_TEXTURE
+			// (VkImage) and with the D3D12 driver (ID3D12Resource*). Driver buffer
+			// IDs are BufferInfo pointers (see buffer_create), so the raw id is a
+			// private struct address, not a native handle.
+			const BufferInfo *buf_info = (const BufferInfo *)p_driver_id.id;
+			return (uint64_t)buf_info->vk_buffer;
+		} break;
 		case DRIVER_RESOURCE_SAMPLER:
 		case DRIVER_RESOURCE_UNIFORM_SET:
-		case DRIVER_RESOURCE_BUFFER:
 		case DRIVER_RESOURCE_COMPUTE_PIPELINE:
 		case DRIVER_RESOURCE_RENDER_PIPELINE: {
 			return p_driver_id.id;
-		}
+		} break;
 		default: {
 			return 0;
 		}

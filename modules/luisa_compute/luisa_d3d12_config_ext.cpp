@@ -1,5 +1,5 @@
 /**************************************************************************/
-/*  luisa_command_pool.h                                                  */
+/*  luisa_d3d12_config_ext.cpp                                            */
 /**************************************************************************/
 /*                         This file is part of:                          */
 /*                             GODOT ENGINE                               */
@@ -21,53 +21,54 @@
 /*                                                                        */
 /* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,        */
 /* EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF     */
-/* MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.   */
+/* MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. */
 /* IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY   */
 /* CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,   */
 /* TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE      */
-/* SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.                  */
+/* SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.                 */
 /**************************************************************************/
 
-#pragma once
+#if defined(LUISA_COMPUTE_ENABLED) && defined(D3D12_ENABLED)
 
-#ifdef LUISA_COMPUTE_ENABLED
+#include "luisa_d3d12_config_ext.h"
 
-#include <vulkan/vulkan_core.h>
+#include "core/error/error_macros.h"
 
-#include "core/templates/local_vector.h"
-#include "core/os/memory.h"
-#include "core/os/mutex.h"
-// Owns, on Godot's borrowed VkDevice, a small set of per-queue-family
-// VkCommandPools used to hand fresh primary command buffers to the Luisa
-// backend via VulkanDeviceConfigExt::borrow_command_buffer(). Luisa records
-// into these Godot-allocated buffers and the backend submits them on the
-// shared queues. The pool itself is created lazily on first borrow for a
-// given family and torn down at shutdown() — before Godot destroys the
-// VkDevice — because every VkCommandPool/VkCommandBuffer lives on Godot's
-// device handle.
-class LuisaCommandPool {
-	VkDevice vk_device = VK_NULL_HANDLE;
-	// One pool per queue family we ever borrow for. Sparse: indexed by family.
-	LocalVector<VkCommandPool> pools;
-	mutable Mutex mtx;
+#include <luisa/core/stl/memory.h>
 
-	void _destroy_pool(uint32_t p_family_index);
+using namespace luisa::compute;
 
-public:
-	LuisaCommandPool() = default;
-	~LuisaCommandPool();
+// See luisa_d3d12_config_ext.h — allocation routed through Luisa's allocator so
+// the DLL that owns and destroys this object frees memory from its own heap.
+void *GodotD3D12ConfigExt::operator new(size_t p_size) {
+	return luisa::detail::allocator_allocate(p_size, alignof(GodotD3D12ConfigExt));
+}
 
-	// Bind the Godot-owned VkDevice that pools will allocate from. Must be
-	// called before borrow(). The VkDevice must outlive this object.
-	void initialize(VkDevice p_device);
+void GodotD3D12ConfigExt::operator delete(void *p_ptr) {
+	if (p_ptr) {
+		luisa::detail::allocator_deallocate(p_ptr, alignof(GodotD3D12ConfigExt));
+	}
+}
 
-	// Allocate a fresh primary command buffer for the given queue family
-	// (VK_COMMAND_BUFFER_LEVEL_PRIMARY), suitable for the Luisa backend's
-	// one-shot borrow contract. Returns VK_NULL_HANDLE on failure.
-	VkCommandBuffer borrow(uint32_t p_queue_family_index);
+void GodotD3D12ConfigExt::operator delete(void *p_ptr, size_t p_size) {
+	operator delete(p_ptr);
+	(void)p_size;
+}
 
-	// Free all pools/buffers. Must be called before the VkDevice is destroyed.
-	void shutdown();
-};
+luisa::optional<DirectXDeviceConfigExt::ExternalDevice> GodotD3D12ConfigExt::CreateExternalDevice() noexcept {
+	// ensure_device() already validates the handle, so a null here means the ext
+	// was used without being configured. Returning {} would make the backend
+	// create a *second*, unrelated ID3D12Device (the non-external path) instead
+	// of importing Godot's, so fail loudly instead.
+	ERR_FAIL_NULL_V_MSG(dx_device, luisa::optional<ExternalDevice>{}, "LuisaCompute: GodotD3D12ConfigExt has no ID3D12Device; call set_device() before creating the Luisa device.");
+	return ExternalDevice{
+		.device = dx_device,
+		// nullptr: the backend creates its own DXGI factory and re-discovers the
+		// adapter from the borrowed device's LUID. This keeps us out of Godot's
+		// private driver state (no accessor is needed for the first cut).
+		.adapter = nullptr,
+		.factory = nullptr,
+	};
+}
 
-#endif // LUISA_COMPUTE_ENABLED
+#endif // LUISA_COMPUTE_ENABLED && D3D12_ENABLED

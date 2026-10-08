@@ -30,7 +30,10 @@
 
 #pragma once
 
-#ifdef LUISA_COMPUTE_ENABLED
+// The Vulkan bridge is only compiled when the engine has the Vulkan driver; a
+// D3D12-only build of this module must not pull in the Vulkan headers or the
+// volk-dispatched entry points the command pool calls.
+#if defined(LUISA_COMPUTE_ENABLED) && defined(VULKAN_ENABLED)
 
 // Vulkan headers first (godot_vulkan.h handles the volk/vulkan include
 // ordering so the Vk* types and Volk dispatch are consistent with Godot's).
@@ -42,8 +45,6 @@
 #endif
 
 #include <luisa/backends/ext/vk_config_ext.h>
-
-#include "luisa_command_pool.h"
 
 // GodotVulkanConfigExt is the mirror of Godot's VulkanHooks seam: instead of
 // Godot importing an external device, Luisa imports Godot's VkInstance/
@@ -75,7 +76,6 @@ public:
 
 private:
 	GodotHandles handles;
-	LuisaCommandPool command_pool;
 
 public:
 	void set_handles(const GodotHandles &p_handles) { handles = p_handles; }
@@ -122,9 +122,6 @@ public:
 			IDxcCompiler3 *dxc_compiler,
 			IDxcLibrary *dxc_library,
 			IDxcUtils *dxc_utils) noexcept override;
-
-	// Teardown of the module-owned command pools (before VkDevice destruction).
-	void shutdown() { command_pool.shutdown(); }
 };
 
-#endif // LUISA_COMPUTE_ENABLED
+#endif // LUISA_COMPUTE_ENABLED && VULKAN_ENABLED

@@ -1,11 +1,11 @@
 <?xml version="1.0" encoding="UTF-8" ?>
 <class name="LuisaCompute" inherits="Object" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="../../../doc/class.xsd">
 	<brief_description>
-		Luisa Compute companion running on the engine's Vulkan device.
+		Luisa Compute companion running on the engine's rendering device.
 	</brief_description>
 	<description>
-		LuisaCompute imports Godot's Vulkan [code]VkInstance[/code]/[code]VkDevice[/code]/queues into a compute-only Luisa Compute [Device] and exposes zero-copy bidirectional buffer/texture interop. The Luisa device is created lazily by calling [method ensure_device] after [method RenderingDevice.make_current] (usually during renderer setup), and must be destroyed with [method shutdown] before the Godot Vulkan context is torn down.
-		Only one Luisa Vulkan [Device] may be alive in a process at a time (Volk process-global dispatch tables). The companion is enabled by building the engine with [code]luisa_compute=yes[/code]; both the SCons and XMake builds use the same build mode (debug/release) so the produced libraries are ABI- and CRT-compatible with the engine.
+		LuisaCompute imports Godot's rendering device handles into a compute-only Luisa Compute [Device]: the Vulkan driver's [code]VkInstance[/code]/[code]VkDevice[/code]/queues on every platform, and the Direct3D 12 driver's [code]ID3D12Device[/code] on Windows. The backend is chosen at runtime from the rendering driver Godot actually created, so a build that ships both drivers works with either. It exposes zero-copy buffer/texture interop (buffers via [method wrap_storage_buffer_f32]; D3D12 resources additionally go through the module's barrier state reconciliation). The Luisa device is created lazily by calling [method ensure_device] after [method RenderingDevice.make_current] (usually during renderer setup), and must be destroyed with [method shutdown] before the Godot rendering context is torn down.
+		Only one Luisa [Device] per backend may be alive in a process at a time (Volk uses process-global dispatch tables). The companion is enabled by building the engine with [code]luisa_compute=yes[/code]; both the SCons and XMake builds use the same build mode (debug/release) so the produced libraries are ABI- and CRT-compatible with the engine.
 	</description>
 	<tutorials>
 	</tutorials>
@@ -13,13 +13,30 @@
 		<method name="ensure_device">
 			<return type="bool" />
 			<description>
-				Lazily creates the Luisa [Device] on top of Godot's Vulkan handles. Safe to call multiple times; returns [code]true[/code] once the device exists. Call after [method RenderingDevice.make_current].
+				Lazily creates the Luisa [Device] on top of Godot's rendering device handles (Vulkan or Direct3D 12, whichever driver is active). Safe to call multiple times; returns [code]true[/code] once the device exists. Call after [method RenderingDevice.make_current].
 			</description>
 		</method>
 		<method name="shutdown">
 			<return type="void" />
 			<description>
-				Destroys the Luisa [Device] and every borrowed command buffer before Godot tears down the Vulkan context (every imported handle is owned by Godot). Called automatically at server-level teardown.
+				Destroys the Luisa [Device] and the bridge's wrapped-resource registry before Godot tears down its rendering context (every imported handle is owned by Godot). Called automatically at server-level teardown.
+			</description>
+		</method>
+		<method name="wrap_storage_buffer_f32">
+			<return type="bool" />
+			<param index="0" name="buffer_rid" type="RID" />
+			<param index="1" name="elem_count" type="int" />
+			<description>
+				Wraps a [RenderingDevice] storage buffer RID (whose data is interpreted as [code]float32[/code] elements) as a zero-copy Luisa buffer on the active backend. On Direct3D 12 the buffer is imported in the [code]D3D12_RESOURCE_STATE_COMMON[/code] state Godot creates GPU storage buffers in; the import registers it in the bridge's wrapped-resource registry, which the state reconciliation tracks. Returns [code]true[/code] on success (a device must have been created with [method ensure_device] first). Repeated calls for the same RID replace the registry entry.
+				[b]Current status:[/b] both the Direct3D 12 and the Vulkan path are verified end-to-end on a fresh storage buffer (ramp kernel through the imported native resource, plus a [method RenderingDevice.buffer_get_data] cross-check). Note the buffer must be fresh (created without initial data) when wrapped, because the wrap registers the resource's current state and a prior [method RenderingDevice.buffer_update] leaves it in [code]COPY_DEST[/code].
+			</description>
+		</method>
+		<method name="run_buffer_self_test">
+			<return type="bool" />
+			<param index="0" name="buffer_rid" type="RID" />
+			<param index="1" name="elem_count" type="int" />
+			<description>
+				Runs the full wrap -&gt; dispatch -&gt; state-reconciliation -&gt; readback path on [param buffer_rid] (a [RenderingDevice] storage buffer, [param elem_count] [code]float32[/code] elements) in three legs: leg 1 dispatches the kernel over a purely Luisa-owned buffer (toolchain sanity, no imported resource), then [param buffer_rid] is wrapped and the same ramp kernel writing [code]buf[i] = float(i) * 2.0f[/code] runs through it (leg 2 downloads it straight to the CPU, leg 3 reads it from a second kernel into a Luisa-owned staging buffer and downloads that), reconciling wrapped-resource states (Direct3D 12) and synchronizing the Luisa stream in between. Returns [code]true[/code] iff every leg validates. [param buffer_rid] must be a freshly created storage buffer that [method RenderingDevice.buffer_update] has never touched. Intended for headless verification tests.
 			</description>
 		</method>
 	</methods>

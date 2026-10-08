@@ -53,8 +53,9 @@ void initialize_luisa_compute_module(ModuleInitializationLevel p_level) {
 void uninitialize_luisa_compute_module(ModuleInitializationLevel p_level) {
 	if (p_level == MODULE_INITIALIZATION_LEVEL_SERVERS) {
 		// Destroy the Luisa device (and borrowed command buffers) BEFORE Godot
-		// tears down the Vulkan context: every handle Luisa borrowed is owned
-		// by Godot, so it must be released while that VkDevice is still alive.
+		// tears down its rendering context (Vulkan or D3D12): every handle Luisa
+		// borrowed is owned by Godot, so it must be released while that device is
+		// still alive.
 		if (luisa_compute) {
 			luisa_compute->shutdown();
 			memdelete(luisa_compute);

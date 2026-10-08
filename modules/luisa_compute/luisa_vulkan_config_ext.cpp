@@ -28,7 +28,7 @@
 /* SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.                  */
 /**************************************************************************/
 
-#ifdef LUISA_COMPUTE_ENABLED
+#if defined(LUISA_COMPUTE_ENABLED) && defined(VULKAN_ENABLED)
 
 #include "luisa_vulkan_config_ext.h"
 
@@ -79,40 +79,40 @@ VulkanDeviceConfigExt::ExternalDevice GodotVulkanConfigExt::create_external_devi
 }
 
 VkCommandBuffer GodotVulkanConfigExt::borrow_command_buffer(StreamTag p_stream_tag) noexcept {
-	// Map the Luisa stream role to Godot's queue family index. We reuse the
-	// same family across all roles (mirroring the reference test), because
-	// Godot's main queue already supports graphics+compute+copy.
-	uint32_t family = handles.compute_queue_family_index;
-	switch (p_stream_tag) {
-		case StreamTag::GRAPHICS:
-			family = handles.graphics_queue_family_index;
-			break;
-		case StreamTag::COMPUTE:
-			family = handles.compute_queue_family_index;
-			break;
-		case StreamTag::COPY:
-			family = handles.copy_queue_family_index;
-			break;
-		case StreamTag::CUSTOM:
-			family = handles.compute_queue_family_index;
-			break;
-	}
-	if (family == VK_QUEUE_FAMILY_IGNORED) {
-		return VK_NULL_HANDLE;
-	}
-	// Lazily initialize the command pool against Godot's VkDevice on first borrow.
-	if (handles.device != VK_NULL_HANDLE) {
-		command_pool.initialize(handles.device);
-	}
-	return command_pool.borrow(family);
+	// Deliberately return null: VulkanDeviceConfigExt documents this as
+	// "return a fresh buffer on every call; return null to use a backend-owned
+	// recyclable buffer" (include/luisa/backends/ext/vk_config_ext.h:141-146), and
+	// the backend-owned path is what we use.
+	//
+	// A module-owned VkCommandPool was tried first (allocating a fresh primary
+	// command buffer per acquisition through Godot's Vulkan dispatch) and it
+	// deterministically crashed in Phase C: the module's vkCreateCommandPool call
+	// does NOT go through the volk table Godot loaded. Measured on the live device:
+	//   command pool built WITH volk; slot=00007FF65B7D33F8 value=00007FF65B7D33F8
+	// i.e. the symbol resolved to a forwarding stub (an executable at that address,
+	// not volk's `extern PFN_vkCreateCommandPool` data slot — those two would differ),
+	// supplied by Luisa's own volk copy (luisa-ext-lc-volk.lib is on the module's
+	// link line), whose dispatch table is only ever initialized inside
+	// luisa-backend-vk.dll. Calling through it faulted on the stub's first
+	// instruction (crash frame main+0xa6833f8 == that very address).
+	//
+	// The module therefore performs no Vulkan entry-point calls of its own: it only
+	// hands borrowed handles to the backend, which dispatches through its own
+	// initialized table and recycles its command buffers. That is also the
+	// compute-companion role we want: Godot's command buffers/queues stay untouched
+	// and the backend serializes submissions on the shared VkQueue.
+	(void)p_stream_tag;
+	return VK_NULL_HANDLE;
 }
 
 void GodotVulkanConfigExt::init_volk(PFN_vkGetInstanceProcAddr p_handler) noexcept {
-#ifdef USE_VOLK
-	if (p_handler != nullptr) {
-		volkInitializeCustom(p_handler);
-	}
-#endif
+	// No-op on purpose. The callback exists so a client that owns a Vulkan dispatch
+	// table can pin it to the backend's loader (volkInitializeCustom). We have no
+	// module-side dispatch any more (see borrow_command_buffer), and calling
+	// volkInitializeCustom here would re-point the copy of volk linked into the
+	// engine binary — Godot's own driver uses that table — with the loader the
+	// backend chose. Leave Godot's dispatch exactly as Godot set it up.
+	(void)p_handler;
 }
 
 void GodotVulkanConfigExt::readback_vulkan_device(
@@ -131,13 +131,9 @@ void GodotVulkanConfigExt::readback_vulkan_device(
 		IDxcLibrary *p_dxc_library,
 		IDxcUtils *p_dxc_utils) noexcept {
 	// The backend calls this after device init with the effective handles. We
-	// already have all of them from Godot, so just load the Volk instance-level
-	// table so our private dispatch (if any) resolves the right loader.
-#ifdef USE_VOLK
-	if (p_instance != VK_NULL_HANDLE) {
-		volkLoadInstanceOnly(p_instance);
-	}
-#else
+	// already have all of them from Godot and the module owns no Vulkan dispatch
+	// table (see borrow_command_buffer), so there is nothing to pin: calling
+	// volkLoadInstanceOnly() here would touch the engine-wide volk state.
 	(void)p_instance;
 	(void)p_physical_device;
 	(void)p_device;
@@ -152,7 +148,6 @@ void GodotVulkanConfigExt::readback_vulkan_device(
 	(void)p_dxc_compiler;
 	(void)p_dxc_library;
 	(void)p_dxc_utils;
-#endif
 }
 
-#endif // LUISA_COMPUTE_ENABLED
+#endif // LUISA_COMPUTE_ENABLED && VULKAN_ENABLED
