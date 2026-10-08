@@ -4527,6 +4527,9 @@ void DisplayServerWindows::process_events() {
 
 	bool has_touch_events = process_raw_input();
 
+	DisplayServerEnums::WindowID window_id = _get_focused_window_or_popup();
+	const WindowData &wd = windows[window_id];
+
 	// The pump throttles only what the hardware can flood, and drains the rest.
 	// See <https://ph3at.github.io/posts/Windows-Input/> for more information.
 	//
@@ -4560,7 +4563,7 @@ void DisplayServerWindows::process_events() {
 		}
 		return ret;
 	};
-	if (has_touch_events) {
+	if (has_touch_events || wd.ime_active) {
 		// Process all messages.
 		while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
 			TranslateMessage(&msg);
@@ -8180,6 +8183,7 @@ DisplayServerWindows::DisplayServerWindows(const String &p_rendering_driver, Dis
 					main_window_created = true;
 				}
 
+#ifdef RD_ENABLED
 				if (_create_rendering_context_window(DisplayServerEnums::MAIN_WINDOW_ID, tested_rendering_driver) == OK) {
 					rendering_device = memnew(RenderingDevice);
 					if (rendering_device->initialize(rendering_context, DisplayServerEnums::MAIN_WINDOW_ID) == OK) {
@@ -8204,6 +8208,7 @@ DisplayServerWindows::DisplayServerWindows(const String &p_rendering_driver, Dis
 
 					_destroy_rendering_context_window(DisplayServerEnums::MAIN_WINDOW_ID);
 				}
+#endif // RD_ENABLED
 			}
 
 			memdelete(rendering_context);

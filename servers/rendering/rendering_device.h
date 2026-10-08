@@ -1306,6 +1306,8 @@ public:
 
 	void update_pipeline_cache(bool p_closing = false);
 
+	_FORCE_INLINE_ bool is_pipeline_cache_enabled() const { return pipeline_cache_enabled; }
+
 private:
 	/****************/
 	/**** SCREEN ****/
@@ -1758,6 +1760,13 @@ private:
 	bool _dependencies_make_mutable(RID p_id, RDG::ResourceTracker *p_resource_tracker);
 
 	RenderingDeviceGraph draw_graph;
+
+#ifdef DEBUG_ENABLED
+	bool draw_graph_reorder_commands = true;
+	bool draw_graph_full_barriers = false;
+
+	void _configure_draw_graph_flags();
+#endif
 
 	/**************************/
 	/**** QUEUE MANAGEMENT ****/

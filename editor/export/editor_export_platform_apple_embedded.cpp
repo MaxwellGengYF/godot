@@ -750,6 +750,21 @@ String EditorExportPlatformAppleEmbedded::_process_config_file_line(const Ref<Ed
 			}
 		}
 		strnew += "\t</array>\n";
+
+		// AccessKit Framework
+	} else if (p_line.contains("$accesskit_buildfile")) {
+		String value = p_config.has_accesskit ? "34E718094B1805BD1139E86C /* AccessKit.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = A06DCD3FADF513A489D6CE0C /* AccessKit.xcframework */; };" : "";
+		strnew += p_line.replace("$accesskit_buildfile", value) + "\n";
+	} else if (p_line.contains("$accesskit_fileref")) {
+		String value = p_config.has_accesskit ? "A06DCD3FADF513A489D6CE0C /* AccessKit.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; name = AccessKit; path = AccessKit.xcframework; sourceTree = \"<group>\"; };" : "";
+		strnew += p_line.replace("$accesskit_fileref", value) + "\n";
+	} else if (p_line.contains("$accesskit_buildphase")) {
+		String value = p_config.has_accesskit ? "34E718094B1805BD1139E86C /* AccessKit.xcframework in Frameworks */," : "";
+		strnew += p_line.replace("$accesskit_buildphase", value) + "\n";
+	} else if (p_line.contains("$accesskit_buildgrp")) {
+		String value = p_config.has_accesskit ? "A06DCD3FADF513A489D6CE0C /* AccessKit.xcframework */," : "";
+		strnew += p_line.replace("$accesskit_buildgrp", value) + "\n";
+
 	} else if (p_line.contains("$sdkroot")) {
 		strnew += p_line.replace("$sdkroot", get_sdk_name()) + "\n";
 
@@ -1738,7 +1753,7 @@ Error EditorExportPlatformAppleEmbedded::_export_project_helper(const Ref<Editor
 
 	bool export_project_only = p_preset->get("application/export_project_only");
 	if (p_oneclick) {
-		export_project_only = false; // Skip for one-click deploy.
+		export_project_only = false; // Skip for remote deploy.
 	}
 
 	EditorProgress ep("export", export_project_only ? TTR("Exporting for " + get_name() + " (Project Files Only)") : TTR("Exporting for " + get_name() + ""), export_project_only ? 2 : 5, true);
@@ -1918,6 +1933,24 @@ Error EditorExportPlatformAppleEmbedded::_export_project_helper(const Ref<Editor
 	if (!src_pkg_zip) {
 		add_message(EXPORT_MESSAGE_ERROR, TTR("Prepare Templates"), TTR("Could not open export template (not a zip file?): \"%s\".", src_pkg_name));
 		return ERR_CANT_OPEN;
+	}
+
+	constexpr int ZIP_FNAME_MAX = 16384;
+
+	{
+		int scan_ret = unzGoToFirstFile(src_pkg_zip);
+		while (scan_ret == UNZ_OK) {
+			unz_file_info scan_info;
+			char scan_fname[ZIP_FNAME_MAX];
+			if (unzGetCurrentFileInfo(src_pkg_zip, &scan_info, scan_fname, ZIP_FNAME_MAX, nullptr, 0, nullptr, 0) != UNZ_OK) {
+				break;
+			}
+			if (String::utf8(scan_fname).begins_with("AccessKit.xcframework/")) {
+				config_data.has_accesskit = true;
+				break;
+			}
+			scan_ret = unzGoToNextFile(src_pkg_zip);
+		}
 	}
 
 	err = _export_apple_embedded_plugins(p_preset, config_data, binary_dir, module_libs, assets, p_debug);
@@ -3098,10 +3131,10 @@ void EditorExportPlatformAppleEmbedded::_initialize(const char *p_platform_logo_
 	Ref<Image> img = memnew(Image);
 	const bool upsample = !Math::is_equal_approx(Math::round(EDSCALE), EDSCALE);
 
-	ImageLoaderSVG::create_image_from_string(img, p_platform_logo_svg, EDSCALE, upsample, false);
+	ImageLoaderSVG::create_image_from_string(img, p_platform_logo_svg, EDSCALE, upsample, HashMap<Color, Color>());
 	logo = ImageTexture::create_from_image(img);
 
-	ImageLoaderSVG::create_image_from_string(img, p_run_icon_svg, EDSCALE, upsample, false);
+	ImageLoaderSVG::create_image_from_string(img, p_run_icon_svg, EDSCALE, upsample, HashMap<Color, Color>());
 	run_icon = ImageTexture::create_from_image(img);
 
 	plugins_changed.set();

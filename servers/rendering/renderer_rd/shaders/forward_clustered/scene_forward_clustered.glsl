@@ -1738,6 +1738,8 @@ void fragment_shader(in SceneData scene_data) {
 		indirect_specular_light *= scene_data.IBL_exposure_normalization;
 		indirect_specular_light *= horizon * horizon;
 		indirect_specular_light *= scene_data.ambient_light_color_energy.a;
+	} else if (bool(scene_data.flags & SCENE_DATA_FLAGS_USE_REFLECTION_COLOR)) {
+		indirect_specular_light = scene_data.reflection_color.rgb;
 	}
 
 #if defined(CUSTOM_RADIANCE_USED)
@@ -1796,6 +1798,8 @@ void fragment_shader(in SceneData scene_data) {
 
 #endif //USE_RADIANCE_OCTMAP_ARRAY
 		cc_specular_light += clearcoat_light * scene_data.IBL_exposure_normalization * scene_data.ambient_light_color_energy.a;
+	} else if (bool(scene_data.flags & SCENE_DATA_FLAGS_USE_REFLECTION_COLOR)) {
+		cc_specular_light = scene_data.reflection_color.rgb;
 	}
 #endif // LIGHT_CLEARCOAT_USED
 #endif // !AMBIENT_LIGHT_DISABLED
@@ -1912,7 +1916,7 @@ void fragment_shader(in SceneData scene_data) {
 								transmittance_color,
 								transmittance_depth,
 								transmittance_boost,
-								transmittance_z,
+								0.0,
 #endif
 #ifdef LIGHT_RIM_USED
 								rim, rim_tint,
@@ -2624,6 +2628,18 @@ void fragment_shader(in SceneData scene_data) {
 #endif
 
 #undef BIAS_FUNC
+
+					//process sscs
+					if (bool(implementation_data.ss_effects_flags & SCREEN_SPACE_EFFECTS_FLAGS_USE_SSCS) && directional_lights.data[i].sscs_index != 0xFFFFFFFF) {
+#ifdef USE_MULTIVIEW
+						float sscs_layer = float(directional_lights.data[i].sscs_index * 2u + uint(ViewIndex));
+#else
+					float sscs_layer = float(directional_lights.data[i].sscs_index);
+#endif // USE_MULTIVIEW
+						float sscs_shadow = textureLod(sampler2DArray(sscs_buffer, SAMPLER_LINEAR_CLAMP), vec3(screen_uv, sscs_layer), 0.0).r;
+
+						shadow = min(shadow, sscs_shadow);
+					}
 				} // shadows
 
 				if (i < 4) {

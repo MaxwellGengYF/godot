@@ -540,7 +540,7 @@
 			<return type="int" />
 			<param index="0" name="index" type="int" />
 			<description>
-				Returns the timestamp in GPU time for the rendering step specified by [param index] (in microseconds since the engine started). See also [method get_captured_timestamp_cpu_time] and [method capture_timestamp].
+				Returns the timestamp in GPU time for the rendering step specified by [param index] (in nanoseconds since the engine started). See also [method get_captured_timestamp_cpu_time] and [method capture_timestamp].
 			</description>
 		</method>
 		<method name="get_captured_timestamp_name" qualifiers="const">
@@ -2374,7 +2374,7 @@
 			rd = RenderingServer.get_rendering_device()
 
 			if rd.has_feature(RenderingDevice.SUPPORTS_RAYTRACING_PIPELINE):
-			    storage_buffer = rd.storage_buffer_create(bytes.size(), bytes, RenderingDevice.BUFFER_CREATION_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT)
+				storage_buffer = rd.storage_buffer_create(bytes.size(), bytes, RenderingDevice.BUFFER_CREATION_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT)
 			[/gdscript]
 			[/codeblocks]
 		</constant>
