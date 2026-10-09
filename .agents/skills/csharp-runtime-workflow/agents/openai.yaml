@@ -1,0 +1,4 @@
+interface:
+  display_name: "C# Runtime Development Workflow"
+  short_description: "Complete C# runtime development, performance, and quality validation in the semevia-next style"
+  default_prompt: "Use $csharp-runtime-workflow to complete the current C# runtime task in the semevia-next style and quality standard, and provide the relevant verification evidence."
