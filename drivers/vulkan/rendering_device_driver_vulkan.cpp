@@ -597,6 +597,7 @@ Error RenderingDeviceDriverVulkan::_initialize_device_extensions() {
 	_register_requested_device_extension(VK_NV_RAY_TRACING_VALIDATION_EXTENSION_NAME, false);
 	_register_requested_device_extension(VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME, false);
 	_register_requested_device_extension(VK_KHR_RAY_QUERY_EXTENSION_NAME, false);
+	_register_requested_device_extension(VK_KHR_SPIRV_1_4_EXTENSION_NAME, false);
 
 	// We don't actually use this extension, but some runtime components on some platforms
 	// can and will fill the validation layers with useless info otherwise if not enabled.
@@ -1645,6 +1646,10 @@ Error RenderingDeviceDriverVulkan::_initialize_allocator() {
 	if (buffer_device_address_support) {
 		allocator_info.flags |= VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT;
 	}
+	// See GH-125146 for context.
+	if (physical_device_properties.vendorID == RenderingContextDriver::Vendor::VENDOR_AMD && physical_device_properties.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU) {
+		allocator_info.flags |= VMA_ALLOCATOR_CREATE_IGNORE_MAX_MEMORY_ALLOCATION_COUNT_BIT;
+	}
 	VkResult err = vmaCreateAllocator(&allocator_info, &allocator);
 	ERR_FAIL_COND_V_MSG(err, ERR_CANT_CREATE, vformat("Couldn't create Vulkan memory allocator (VkResult error %d).", err));
 
@@ -1920,7 +1925,7 @@ void RenderingDeviceDriverVulkan::_set_object_name(VkObjectType p_object_type, u
 		// Debug marker extensions.
 		CharString obj_data = p_object_name.utf8();
 		VkDebugMarkerObjectNameInfoEXT name_info;
-		name_info.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_OBJECT_NAME_INFO_EXT;
+		name_info.sType = VK_STRUCTURE_TYPE_DEBUG_MARKER_OBJECT_NAME_INFO_EXT;
 		name_info.pNext = nullptr;
 		name_info.objectType = _convert_to_debug_report_objectType(p_object_type);
 		name_info.object = p_object_handle;
@@ -2345,6 +2350,10 @@ VkSampleCountFlagBits RenderingDeviceDriverVulkan::_ensure_supported_sample_coun
 	return VK_SAMPLE_COUNT_1_BIT;
 }
 
+RDD::TextureSamples RenderingDeviceDriverVulkan::texture_get_nearest_supported_samples(const TextureFormat &p_format) {
+	return TextureSamples(Math::get_shift_from_power_of_2((uint32_t)_ensure_supported_sample_count(p_format.samples)));
+}
+
 RDD::TextureID RenderingDeviceDriverVulkan::texture_create(const TextureFormat &p_format, const TextureView &p_view) {
 	VkImageCreateInfo create_info = {};
 	create_info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
@@ -2395,7 +2404,8 @@ RDD::TextureID RenderingDeviceDriverVulkan::texture_create(const TextureFormat &
 	create_info.mipLevels = p_format.mipmaps;
 	create_info.arrayLayers = p_format.array_layers;
 
-	create_info.samples = _ensure_supported_sample_count(p_format.samples);
+	ERR_FAIL_COND_V_MSG(texture_get_nearest_supported_samples(p_format) != p_format.samples, TextureID(), "Unsupported sample count.");
+	create_info.samples = RD_TO_VK_SAMPLE_COUNT[p_format.samples];
 	create_info.tiling = (p_format.usage_bits & TEXTURE_USAGE_CPU_READ_BIT) ? VK_IMAGE_TILING_LINEAR : VK_IMAGE_TILING_OPTIMAL;
 
 	// Usage.
@@ -4994,8 +5004,8 @@ RDD::UniformSetID RenderingDeviceDriverVulkan::uniform_set_create(VectorView<Bou
 				acceleration_structure_write->accelerationStructureCount = 1;
 				acceleration_structure_write->pAccelerationStructures = &accel_info->vk_acceleration_structure;
 
-				vk_writes[i].descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
-				vk_writes[i].pNext = acceleration_structure_write;
+				vk_writes[writes_amount].descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
+				vk_writes[writes_amount].pNext = acceleration_structure_write;
 			} break;
 			default: {
 				DEV_ASSERT(false);

@@ -62,28 +62,25 @@ open class GodotEditor : BaseGodotEditor() {
 	companion object {
 		private val TAG = GodotEditor::class.java.simpleName
 
+		private val DEFAULT_ACTIVITY_PANEL_PIXEL_DIMENSIONS = IntSize2d(250, 250)
 		private val MAIN_WINDOW_PANEL_MIN_SIZE = FloatSize3d(0.45f, 0.25f, 0.0f)
-		private val SPATIAL_CONTAINER_PANEL_MIN_SIZE = FloatSize3d(0.05f, 0.05f, 0.0f)
 	}
 
 	private val handler = Handler()
+	private val windowIdToPanelEntity = HashMap<Int, ActivityPanelEntity>()
 
-	private var pendingFullSpaceRequest = false
-	private val pendingSpatialContainerLaunches = LinkedList<Intent>()
-
+	private val pendingNewInstanceLaunches = LinkedList<Triple<EditorWindowInfo, Intent, ActivityOptions?>>()
 	private val spatialCapabilitiesChangedListener = Consumer<Set<SpatialCapability>> {
-		if (canEmbedActivity()) {
-			pendingFullSpaceRequest = false
-
+		if (!isInFullSpace()) {
+			// TODO: There's an OS bug that prevents properly resuming home space when launching new Activity
+			//  instances while in full space. As a workaround, we launch those instances in home space.
+			//  This logic should be removed when the OS bug is fixed.
 			// Launch any queued spatial containers.
-			Log.v(TAG, "Launching pending spatial container launches..")
-			for (pendingLaunch in pendingSpatialContainerLaunches) {
-				startSpatialContainerActivity(pendingLaunch)
+			Log.v(TAG, "Launching pending new instances..")
+			for ((first, second, third) in pendingNewInstanceLaunches) {
+				dispatchNewInstance(first, second, third)
 			}
-			pendingSpatialContainerLaunches.clear()
-		} else {
-			// Already in HSM, so remove any request to transition.
-			handler.removeCallbacks(requestHomeSpaceRunnable)
+			pendingNewInstanceLaunches.clear()
 		}
 	}
 
@@ -102,44 +99,24 @@ open class GodotEditor : BaseGodotEditor() {
 	}
 
 	private val requestHomeSpaceRunnable: Runnable = Runnable {
-		val scene = session?.scene ?: return@Runnable
-
 		handler.removeCallbacks(requestHomeSpaceRunnable)
-		if (canEmbedActivity()) {
-			scene.requestHomeSpace()
+		if (isInFullSpace()) {
+			Log.v(TAG, "Requesting home space")
+			session?.scene?.requestHomeSpace()
 		}
 	}
 
-	private fun canEmbedActivity(): Boolean {
+	private val requestFullSpaceRunnable: Runnable = Runnable {
+		handler.removeCallbacks(requestFullSpaceRunnable)
+		if (!isInFullSpace()) {
+			Log.v(TAG, "Requesting full space")
+			session?.scene?.requestFullSpace()
+		}
+	}
+
+	private fun isInFullSpace(): Boolean {
 		val scene = session?.scene ?: return false
 		return scene.spatialCapabilities.contains(SpatialCapability.EMBED_ACTIVITY)
-	}
-
-	private fun launchSpatialContainerUsingSceneCore(newInstance: Intent, activityOptions: ActivityOptions?): Boolean {
-		if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-			try {
-				if (session != null) {
-					val scene = session!!.scene
-
-					handler.removeCallbacks(requestHomeSpaceRunnable)
-					if (canEmbedActivity()) {
-						Log.v(TAG, "Launching spatial container in FSM")
-						startSpatialContainerActivity(newInstance)
-					} else {
-						pendingSpatialContainerLaunches.push(newInstance)
-						if (!pendingFullSpaceRequest) {
-							Log.v(TAG, "Requesting full space")
-							scene.requestFullSpace()
-							pendingFullSpaceRequest = true
-						}
-					}
-					return true
-				}
-			} catch (e: Exception) {
-				Log.e(TAG, "Unable to launch spatial container", e)
-			}
-		}
-		return false
 	}
 
 	private fun resizePanelEntity(resizeEvent: ResizeEvent) {
@@ -149,45 +126,66 @@ open class GodotEditor : BaseGodotEditor() {
 		}
 	}
 
-	private fun startSpatialContainerActivity(newInstance: Intent) {
+	private fun startSpatialContainerActivity(editorWindowInfo: EditorWindowInfo, newInstance: Intent): Boolean {
 		if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-			val scene = session!!.scene
+			val scene = session?.scene ?: return false
+
+			val mainPanelWidth = scene.mainPanelEntity.size.width
+			val mainPanelHeight = scene.mainPanelEntity.size.height
+			val spatialContainerBounds = BaseGodotSpatialContainerGame.getSpatialContainerBounds()
+
+			val translationX = if (editorWindowInfo == SPATIAL_CONTAINER_RUN_GAME_INFO_0) {
+				// The first spatial container is positioned to the right of the main panel.
+				mainPanelWidth + spatialContainerBounds.first / 2
+			} else {
+				// The second spatial container is positioned to the left of the main panel.
+				-(mainPanelWidth + spatialContainerBounds.first / 2)
+			}
+			val translationY = -(mainPanelHeight / 2)
 
 			val activityPanel = ActivityPanelEntity.create(
 				session!!,
-				IntSize2d(500, 500),
+				DEFAULT_ACTIVITY_PANEL_PIXEL_DIMENSIONS,
 				"Godot Spatial Container Panel for $newInstance",
-				Pose(Vector3(0.0f, -scene.mainPanelEntity.size.height, 0.05f), Quaternion.Identity),
+				Pose(Vector3(translationX, translationY, 0.25f), Quaternion.Identity),
 				scene.activitySpace
 			)
-			activityPanel.addComponent(MovableComponent.createSystemMovable(session!!))
-			val spatialContainerPanelResizeComponent = ResizableComponent.create(session!!, SPATIAL_CONTAINER_PANEL_MIN_SIZE) { resizePanelEntity(it) }
-			spatialContainerPanelResizeComponent.isFixedAspectRatioEnabled = true
-			activityPanel.addComponent(spatialContainerPanelResizeComponent)
+
+			windowIdToPanelEntity[editorWindowInfo.windowId] = activityPanel
 
 			// We remove the 'NEW_TASK' flag as launching in a new task prevents embedding.
 			newInstance.removeFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+			Log.v(TAG, "Launching spatial container: $newInstance")
 			activityPanel.startActivity(newInstance)
+			return true
 		}
+		return false
 	}
 
-	private fun exitFullSpaceUsingSceneCore() {
-		if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-			handler.postDelayed(requestHomeSpaceRunnable, 250L)
+	private fun exitFullSpace() {
+		handler.postDelayed(requestHomeSpaceRunnable, 50L)
+	}
 
-			session?.scene?.activitySpace?.children?.forEach { child ->
-				if (child is ActivityPanelEntity) {
-					Log.d(TAG, "Removing entity $child from the scene graph.")
-					child.parent = null
-				}
-			}
+	private fun enterFullSpace() {
+		handler.postDelayed(requestFullSpaceRunnable, 50L)
+	}
+
+	override fun getExcludedPermissions(): MutableSet<String> {
+		val excludedPermissions = super.getExcludedPermissions()
+		if (!packageManager.hasSystemFeature("android.hardware.xr.input.eye_tracking")) {
+			// No need to ask for this permission if the device doesn't support eye tracking.
+			excludedPermissions.add("android.permission.EYE_TRACKING_FINE")
 		}
+		return excludedPermissions
 	}
 
 	override fun getXRRuntimePermissions(): MutableSet<String> {
 		val xrRuntimePermissions = super.getXRRuntimePermissions()
 
-		xrRuntimePermissions.add("android.permission.EYE_TRACKING_FINE")
+		if (packageManager.hasSystemFeature("android.hardware.xr.input.eye_tracking")) {
+			// Only ask for this permission at runtime if the device supports eye tracking.
+			xrRuntimePermissions.add("android.permission.EYE_TRACKING_FINE")
+		}
 		xrRuntimePermissions.add("android.permission.HAND_TRACKING")
 
 		return xrRuntimePermissions
@@ -198,21 +196,39 @@ open class GodotEditor : BaseGodotEditor() {
 		newInstance: Intent,
 		activityOptions: ActivityOptions?
 	) {
-		if (isSpatialContainerRunGameInfo(editorWindowInfo) && launchSpatialContainerUsingSceneCore(newInstance, activityOptions)) {
-			return
+		// TODO: There's an OS bug that prevents properly resuming home space when launching new Activity
+		//  instances while in full space. As a workaround, we launch those instances in home space.
+		//  This logic should be removed when the OS bug is fixed.
+		if (!isInFullSpace()) {
+			if (isSpatialContainerRunGameInfo(editorWindowInfo) && startSpatialContainerActivity(editorWindowInfo, newInstance)) {
+				return
+			}
+			super.dispatchNewInstance(editorWindowInfo, newInstance, activityOptions)
+		} else {
+			pendingNewInstanceLaunches.push(Triple(editorWindowInfo, newInstance, activityOptions))
+			exitFullSpace()
 		}
-		super.dispatchNewInstance(editorWindowInfo, newInstance, activityOptions)
+	}
+
+	override fun onEditorConnected(editorId: Int) {
+		super.onEditorConnected(editorId)
+		if (isSpatialContainerRunGameInfoWindowId(editorId)) {
+			enterFullSpace()
+		}
 	}
 
 	override fun onEditorDisconnected(editorId: Int) {
 		if (isSpatialContainerRunGameInfoWindowId(editorId)) {
-			val spatialContainersRunning =
-				(SPATIAL_CONTAINER_RUN_GAME_INFO_0.windowId != editorId && editorMessageDispatcher.hasEditorConnection(SPATIAL_CONTAINER_RUN_GAME_INFO_0)) ||
-					(SPATIAL_CONTAINER_RUN_GAME_INFO_1.windowId != editorId && editorMessageDispatcher.hasEditorConnection(SPATIAL_CONTAINER_RUN_GAME_INFO_1))
+			// Unparent the ActivityPanelEntity.
+			windowIdToPanelEntity.remove(editorId)?.apply {
+				Log.d(TAG, "Removing entity $this from the scene graph.")
+				parent = null
+			}
+
+			val spatialContainersRunning = windowIdToPanelEntity.isNotEmpty()
 			if (!spatialContainersRunning) {
 				// No spatial container is running, time to exit FSM.
-				Log.v(TAG, "Exiting FSM.")
-				exitFullSpaceUsingSceneCore()
+				exitFullSpace()
 			}
 		}
 		super.onEditorDisconnected(editorId)

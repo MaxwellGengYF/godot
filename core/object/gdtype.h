@@ -147,11 +147,15 @@ public:
 	InitState get_init_state() const { return init_state; }
 	void initialize();
 
+	// Removes all held objects, which at the time of writing are only MethodBind defaults.
+	// The reason to do this is to allow a GDExtension to unload itself, and Objects held
+	// here might have references back to the extension.
+	void clear_held_objects();
+
 	const GDType *get_super_type() const { return super_type; }
 	const StringName &get_name() const { return name; }
 	const StringName &get_super_type_name() const {
-		static const StringName EMPTY;
-		return super_type ? super_type->name : EMPTY;
+		return super_type ? super_type->name : StringName::EMPTY;
 	}
 	const Vector<StringName> &get_name_hierarchy() const { return name_hierarchy; }
 

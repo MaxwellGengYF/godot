@@ -1319,7 +1319,7 @@ void DocumentEditorContainer::_close_tab(int p_idx, bool p_save) {
 			_update_history_arrows();
 		}
 
-		document_list->update_list();
+		_update_filenames();
 		_save_layout();
 		_update_find_replace_bar();
 	}
@@ -2261,7 +2261,7 @@ void DocumentEditorContainer::_close_builtin_scripts_from_scene(const String &p_
 void DocumentEditorContainer::_toggle_files_pressed(bool p_pressed) {
 	ERR_FAIL_NULL(list_split);
 	list_split->set_visible(p_pressed);
-	EditorSettings::get_singleton()->set_project_metadata("files_panel", "show_files_panel", list_split->is_visible());
+	EditorSettings::get_singleton()->set_project_metadata("show_files_panel", config_section, list_split->is_visible());
 }
 
 void DocumentEditorContainer::edited_scene_changed() {
@@ -2715,7 +2715,7 @@ Vector<Control *> DocumentEditorContainer::get_all_editors() const {
 void DocumentEditorContainer::focus_active_editor() {
 	ScriptEditorBase *seb = Object::cast_to<ScriptEditorBase>(get_active_editor());
 	EditorHelp *eh = Object::cast_to<EditorHelp>(get_active_editor());
-	if (seb) {
+	if (seb && seb->get_base_editor()) {
 		seb->get_base_editor()->grab_focus();
 	} else if (eh) {
 		eh->set_focused();
@@ -2748,7 +2748,7 @@ PackedStringArray DocumentEditorContainer::get_unsaved_files() const {
 
 void DocumentEditorContainer::save_current_script() {
 	ScriptEditorBase *current = _get_current_editor();
-	if (!current || _test_script_times_on_disk()) {
+	if (!current || !current->is_unsaved() || _test_script_times_on_disk()) {
 		return;
 	}
 
@@ -4073,7 +4073,17 @@ DocumentEditorContainer::DocumentEditorContainer(bool p_is_main_editor, const St
 	toggle_files_button->set_shortcut_context(this);
 	toggle_files_button->set_shortcut(ED_GET_SHORTCUT("script_editor/toggle_files_panel"));
 	menu_hb->add_child(toggle_files_button);
-	bool initial_state = EditorSettings::get_singleton()->get_project_metadata("files_panel", "show_files_panel", true);
+#ifndef DISABLE_DEPRECATED
+	EditorSettings *es = EditorSettings::get_singleton();
+	if (es && es->get_project_metadata("files_panel", "show_files_panel", "") != "") {
+		bool show_files_panel = es->get_project_metadata("files_panel", "show_files_panel", true);
+		es->set_project_metadata("show_files_panel", "ScriptEditor", show_files_panel);
+		es->set_project_metadata("show_files_panel", "ShaderEditor", show_files_panel);
+		es->set_project_metadata("files_panel", "show_files_panel", Variant());
+		es->save_project_metadata();
+	}
+#endif
+	bool initial_state = EditorSettings::get_singleton()->get_project_metadata("show_files_panel", config_section, true);
 	toggle_files_button->set_pressed_no_signal(initial_state);
 	_toggle_files_pressed(initial_state);
 
@@ -4166,6 +4176,7 @@ DocumentEditorContainer::DocumentEditorContainer(bool p_is_main_editor, const St
 
 	script_name_button = memnew(Button);
 	script_name_button->set_flat(true);
+	script_name_button->set_theme_type_variation(SceneStringName(FlatButton));
 	script_name_button->set_text_overrun_behavior(TextServer::OVERRUN_TRIM_ELLIPSIS);
 	script_name_button->set_h_size_flags(SIZE_EXPAND_FILL);
 	script_name_button->set_tooltip_text(TTRC("Navigate to document list."));
@@ -4338,7 +4349,7 @@ void ScriptEditor::update_layout(EditorDock::DockLayout p_layout, int p_slot) {
 		remove_theme_constant_override("margin_right");
 		remove_theme_constant_override("margin_bottom");
 	} else {
-		int margin = EditorNode::get_singleton()->get_editor_theme()->get_constant("base_margin", EditorStringName(Editor));
+		int margin = EDSCALE_RND(EditorNode::get_singleton()->get_editor_theme()->get_constant("base_margin", EditorStringName(Editor)));
 		add_theme_constant_override("margin_left", margin);
 		add_theme_constant_override("margin_right", margin);
 		add_theme_constant_override("margin_bottom", margin);

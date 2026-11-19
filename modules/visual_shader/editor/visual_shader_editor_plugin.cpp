@@ -49,6 +49,7 @@
 #include "editor/editor_string_names.h"
 #include "editor/editor_undo_redo_manager.h"
 #include "editor/file_system/editor_paths.h"
+#include "editor/gui/editor_icon_manager.h"
 #include "editor/gui/editor_toaster.h"
 #include "editor/gui/filter_line_edit.h"
 #include "editor/inspector/editor_properties_vector.h"
@@ -2664,9 +2665,9 @@ bool VisualShaderEditor::_update_preview_parameter_tree() {
 		}
 
 		if (prop.value.type == Variant::OBJECT) {
-			item->set_icon(0, get_editor_theme_icon(SNAME("ImageTexture")));
+			item->set_icon(0, EditorIconManager::get_icon(SNAME("ImageTexture")));
 		} else {
-			item->set_icon(0, get_editor_theme_icon(Variant::get_type_name(prop.value.type)));
+			item->set_icon(0, EditorIconManager::get_icon(Variant::get_type_name(prop.value.type)));
 		}
 	}
 
@@ -4840,7 +4841,7 @@ void VisualShaderEditor::_add_node(int p_idx, const Vector<Variant> &p_ops, cons
 				for (int i = 0; i < vsnode->get_output_port_count(); i++) {
 					if (edited_shader_graph->is_port_types_compatible(vsnode->get_output_port_type(i), input_port_type) || reroute.is_valid()) {
 						undo_redo->add_do_method(edited_shader_graph.ptr(), "connect_nodes", _from_node, i, to_node, to_slot);
-						undo_redo->add_undo_method(visual_shader.ptr(), "disconnect_nodes", type, _from_node, i, to_node, to_slot);
+						undo_redo->add_undo_method(edited_shader_graph.ptr(), "disconnect_nodes", _from_node, i, to_node, to_slot);
 						undo_redo->add_do_method(graph_plugin.ptr(), "connect_nodes", type, _from_node, i, to_node, to_slot);
 						undo_redo->add_undo_method(graph_plugin.ptr(), "disconnect_nodes", type, _from_node, i, to_node, to_slot);
 						break;
@@ -5075,8 +5076,8 @@ void VisualShaderEditor::_connection_request(const String &p_from, int p_from_in
 			undo_redo->add_undo_method(graph_plugin.ptr(), "connect_nodes", type, E.from_node, E.from_port, E.to_node, E.to_port);
 
 			if (swap) {
-				undo_redo->add_do_method(visual_shader.ptr(), "connect_nodes", type, E.from_node, E.from_port, last_to_node, last_to_port);
-				undo_redo->add_undo_method(visual_shader.ptr(), "disconnect_nodes", type, E.from_node, E.from_port, last_to_node, last_to_port);
+				undo_redo->add_do_method(edited_shader_graph.ptr(), "connect_nodes", E.from_node, E.from_port, last_to_node, last_to_port);
+				undo_redo->add_undo_method(edited_shader_graph.ptr(), "disconnect_nodes", E.from_node, E.from_port, last_to_node, last_to_port);
 				undo_redo->add_do_method(graph_plugin.ptr(), "connect_nodes", type, E.from_node, E.from_port, last_to_node, last_to_port);
 				undo_redo->add_undo_method(graph_plugin.ptr(), "disconnect_nodes", type, E.from_node, E.from_port, last_to_node, last_to_port);
 			}
@@ -8506,6 +8507,7 @@ VisualShaderEditor::VisualShaderEditor() {
 	add_options.push_back(AddOption("ScreenUV", "Input/Fragment", "VisualShaderNodeInput", vformat(input_param_for_fragment_and_light_shader_modes, "screen_uv", "SCREEN_UV"), { "screen_uv" }, VisualShaderNode::PORT_TYPE_VECTOR_2D, TYPE_FLAGS_FRAGMENT, Shader::MODE_SPATIAL));
 	add_options.push_back(AddOption("Tangent", "Input/Fragment", "VisualShaderNodeInput", vformat(input_param_for_vertex_and_fragment_shader_modes, "tangent", "TANGENT"), { "tangent" }, VisualShaderNode::PORT_TYPE_VECTOR_3D, TYPE_FLAGS_FRAGMENT, Shader::MODE_SPATIAL));
 	add_options.push_back(AddOption("Vertex", "Input/Fragment", "VisualShaderNodeInput", vformat(input_param_for_vertex_and_fragment_shader_modes, "vertex", "VERTEX"), { "vertex" }, VisualShaderNode::PORT_TYPE_VECTOR_3D, TYPE_FLAGS_FRAGMENT, Shader::MODE_SPATIAL));
+	add_options.push_back(AddOption("LightVertex", "Input/Fragment", "VisualShaderNodeInput", vformat(input_param_for_fragment_shader_mode, "light_vertex", "LIGHT_VERTEX"), { "light_vertex" }, VisualShaderNode::PORT_TYPE_VECTOR_3D, TYPE_FLAGS_FRAGMENT, Shader::MODE_SPATIAL));
 	add_options.push_back(AddOption("View", "Input/Fragment", "VisualShaderNodeInput", vformat(input_param_for_fragment_and_light_shader_modes, "view", "VIEW"), { "view" }, VisualShaderNode::PORT_TYPE_VECTOR_3D, TYPE_FLAGS_FRAGMENT, Shader::MODE_SPATIAL));
 	add_options.push_back(AddOption("ViewIndex", "Input/Fragment", "VisualShaderNodeInput", vformat(input_param_for_vertex_and_fragment_shader_modes, "view_index", "VIEW_INDEX"), { "view_index" }, VisualShaderNode::PORT_TYPE_SCALAR_INT, TYPE_FLAGS_FRAGMENT, Shader::MODE_SPATIAL));
 	add_options.push_back(AddOption("ViewMonoLeft", "Input/Fragment", "VisualShaderNodeInput", vformat(input_param_for_vertex_and_fragment_shader_modes, "view_mono_left", "VIEW_MONO_LEFT"), { "view_mono_left" }, VisualShaderNode::PORT_TYPE_SCALAR_INT, TYPE_FLAGS_FRAGMENT, Shader::MODE_SPATIAL));

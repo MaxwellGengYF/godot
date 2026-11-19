@@ -989,12 +989,12 @@ Control::GrowDirection Control::get_v_grow_direction() const {
 }
 
 void Control::_compute_layout_rect(Rect2 p_rect, bool p_keep_offsets) {
-	Size2 parent_rect_size = get_parent_anchorable_rect().size;
+	Rect2 parent_rect = get_parent_anchorable_rect();
 
 	if (p_keep_offsets) {
 		// If computing anchors, we need to ensure the parent rect size is valid to avoid division by zero.
-		ERR_FAIL_COND(parent_rect_size.x == 0.0);
-		ERR_FAIL_COND(parent_rect_size.y == 0.0);
+		ERR_FAIL_COND(parent_rect.size.x == 0.0);
+		ERR_FAIL_COND(parent_rect.size.y == 0.0);
 	}
 
 	real_t x = p_rect.position.x;
@@ -1017,19 +1017,19 @@ void Control::_compute_layout_rect(Rect2 p_rect, bool p_keep_offsets) {
 	}
 
 	if (is_layout_rtl()) {
-		x = parent_rect_size.x - x - p_rect.size.x;
+		x = parent_rect.size.x + (parent_rect.position.x * 2) - x - p_rect.size.x;
 	}
 
 	if (p_keep_offsets) {
-		data.anchor[0] = (x - data.offset[0]) / parent_rect_size.x;
-		data.anchor[1] = (y - data.offset[1]) / parent_rect_size.y;
-		data.anchor[2] = (x + p_rect.size.x - data.offset[2]) / parent_rect_size.x;
-		data.anchor[3] = (y + p_rect.size.y - data.offset[3]) / parent_rect_size.y;
+		data.anchor[0] = (x - data.offset[0]) / parent_rect.size.x;
+		data.anchor[1] = (y - data.offset[1]) / parent_rect.size.y;
+		data.anchor[2] = (x + p_rect.size.x - data.offset[2]) / parent_rect.size.x;
+		data.anchor[3] = (y + p_rect.size.y - data.offset[3]) / parent_rect.size.y;
 	} else {
-		data.offset[0] = x - (data.anchor[0] * parent_rect_size.x);
-		data.offset[1] = y - (data.anchor[1] * parent_rect_size.y);
-		data.offset[2] = x + p_rect.size.x - (data.anchor[2] * parent_rect_size.x);
-		data.offset[3] = y + p_rect.size.y - (data.anchor[3] * parent_rect_size.y);
+		data.offset[0] = x - (data.anchor[0] * parent_rect.size.x);
+		data.offset[1] = y - (data.anchor[1] * parent_rect.size.y);
+		data.offset[2] = x + p_rect.size.x - (data.anchor[2] * parent_rect.size.x);
+		data.offset[3] = y + p_rect.size.y - (data.anchor[3] * parent_rect.size.y);
 	}
 }
 
@@ -1848,8 +1848,7 @@ void Control::update_maximum_size() {
 	}
 	// Same with desired size.
 	if (!data.updating_last_desired_size) {
-		data.updating_last_desired_size = true;
-		callable_mp(this, &Control::_update_desired_size).call_deferred();
+		update_desired_size();
 	}
 
 	callable_mp(this, &Control::_update_maximum_size).call_deferred();
@@ -2165,7 +2164,7 @@ void Control::remove_child_notify(Node *p_child) {
 
 bool Control::is_layout_pending() const {
 	ERR_MAIN_THREAD_GUARD_V(false);
-	return data.layout_pending;
+	return data.layout_pending || !is_inside_tree() || !is_visible_in_tree();
 }
 
 bool Control::is_layout_pending_in_tree() const {
@@ -2203,6 +2202,18 @@ Control *Control::get_layout_pending_control_in_tree() const {
 }
 
 void Control::call_on_all_layout_pending_finished(const Callable &p_callable) {
+	if (!is_inside_tree()) {
+		Callable recheck(memnew(LayoutRecheckCallable(get_instance_id(), p_callable)));
+		connect(SceneStringName(tree_entered), recheck, CONNECT_ONE_SHOT);
+		return;
+	}
+
+	if (!is_visible_in_tree()) {
+		Callable recheck(memnew(LayoutRecheckCallable(get_instance_id(), p_callable)));
+		connect(SceneStringName(visibility_changed), recheck, CONNECT_ONE_SHOT);
+		return;
+	}
+
 	Control *pending_control = get_layout_pending_control_in_tree();
 	if (pending_control != nullptr) {
 		Callable recheck(memnew(LayoutRecheckCallable(get_instance_id(), p_callable)));

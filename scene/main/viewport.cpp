@@ -2719,7 +2719,7 @@ void Viewport::_gui_update_mouse_over() {
 	}
 
 	// Send Mouse Enter notifications.
-	for (int i = needs_enter.size() - 1; i >= 0; i--) {
+	for (int i = (int)needs_enter.size() - 1; i >= 0; i--) {
 		Control *ctrl = ObjectDB::get_instance<Control>(needs_enter[i]);
 		if (ctrl) {
 			ctrl->notification(Control::NOTIFICATION_MOUSE_ENTER);
@@ -3409,7 +3409,7 @@ void Viewport::_update_mouse_over(Vector2 p_pos) {
 			gui.sending_mouse_enter_exit_notifications = true;
 
 			// Send Mouse Enter notifications to parents first.
-			for (int i = over_ancestors.size() - 1; i >= 0; i--) {
+			for (int i = (int)over_ancestors.size() - 1; i >= 0; i--) {
 				Control *ctrl = ObjectDB::get_instance<Control>(over_ancestors[i]);
 				if (ctrl) {
 					gui.mouse_over_hierarchy.push_back(over_ancestors[i]);
@@ -3618,7 +3618,8 @@ void Viewport::_push_shortcut_input_internal(const Ref<InputEvent> &p_event) {
 	ERR_FAIL_COND(!is_inside_tree());
 	get_tree()->_call_input_pause(shortcut_input_group, SceneTree::CALL_INPUT_TYPE_SHORTCUT_INPUT, p_event, this);
 
-	if (!propagate_shortcuts_to_parent || is_input_handled()) {
+	// Only InputEventKey needs to be propagated, since it's a per-window event.
+	if (!propagate_shortcuts_to_parent || Object::cast_to<InputEventKey>(*p_event) == nullptr || is_input_handled()) {
 		return;
 	}
 
@@ -5900,7 +5901,7 @@ void Viewport::CameraOverride<T>::enable(Viewport *p_viewport, const T *p_curren
 	}
 
 	T *override_camera = memnew(T);
-	override_camera->set_name(vformat("Override%s", T ::get_class_static()));
+	override_camera->set_name(vformat("Override%s", T::get_class_static()));
 	p_viewport->add_child(override_camera, false, Node::INTERNAL_MODE_BACK);
 
 	override_camera->make_current();
